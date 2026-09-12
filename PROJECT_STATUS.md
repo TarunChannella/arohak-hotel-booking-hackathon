@@ -15,7 +15,7 @@
 | Item | Value |
 |---|---|
 | Branch | `main` |
-| Latest commit | see section 10 |
+| Latest commit | `34bae9e` — Implement Mandatory MVP: auth, roles, hotel/room management, booking |
 | Remote | `https://github.com/TarunChannella/arohak-hotel-booking-hackathon.git` |
 | Pushed | **No.** Awaiting the Sprint 1 push window (12:45–1:00 PM IST). |
 
