@@ -129,6 +129,17 @@
       <div id="cancel-queue" class="cards"></div>
     </section>
 
+    <section id="manage-document" class="panel">
+      <h2>Hotel information PDF</h2>
+      <p class="muted">The chatbot answers only from this document. Replacing it re-extracts the text and rebuilds the search index for this hotel.</p>
+      <div id="doc-info" class="cards"></div>
+      <form id="doc-form" class="grid-form">
+        <label class="wide">Replacement PDF<input id="doc-file" type="file" accept="application/pdf,.pdf" required></label>
+        <button class="primary">Upload and re-index</button>
+      </form>
+      <p id="doc-error" class="error"></p>
+    </section>
+
     <section id="assistant" class="panel">
       <h2>Booking assistant</h2>
       <p class="muted">Ask in plain language. The assistant checks real availability and always confirms before booking or cancelling.</p>

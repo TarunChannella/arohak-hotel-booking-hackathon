@@ -1,7 +1,7 @@
 # PROJECT STATUS — AROHAK Hotel Booking Hackathon
 
-**Last updated:** 2026-09-12 11:00 IST
-**Phase:** Sprint 1 — MVP complete, RAG defects fixed, dashboards verified, AI booking assistant implemented
+**Last updated:** 2026-09-12 11:25 IST
+**Phase:** Sprint 1 — MVP complete, true PDF ingestion implemented, assistant and dashboards complete
 **Requirements source:** [docs/AROHAK_PROBLEM_STATEMENT.md](docs/AROHAK_PROBLEM_STATEMENT.md)
 
 > No passwords, tokens, API keys or secrets are recorded in this file. Demo
@@ -15,7 +15,7 @@
 | Item | Value |
 |---|---|
 | Branch | `main` |
-| Latest commit | `b767f4c` — Fix RAG correctness, verify dashboards, add controlled booking assistant |
+| Latest commit | see section 11 |
 | Remote | `https://github.com/TarunChannella/arohak-hotel-booking-hackathon.git` |
 | Pushed | **No.** Awaiting the Sprint 1 push window (12:45–1:00 PM IST). |
 
@@ -23,6 +23,7 @@
 
 ## 2. Commands
 
+**Install:** `python -m pip install -r requirements.txt` (one dependency: `pypdf`)
 **Run:** `python server.py` → <http://127.0.0.1:8000>
 Overrides: `PORT`, `HOTEL_DB`, `DEMO_PASSWORD`
 
@@ -32,8 +33,8 @@ Overrides: `PORT`, `HOTEL_DB`, `DEMO_PASSWORD`
 
 ## 3. Test result
 
-**94 tests, 0 failures, 0 errors — OK** (Python 3.12, Windows 11, ~17s).
-Up from 56 at the previous checkpoint.
+**120 tests, 0 failures, 0 errors — OK** (Python 3.12, Windows 11, ~26s).
+Up from 94 at the previous checkpoint.
 
 | Group | Tests | Covers |
 |---|---:|---|
@@ -46,6 +47,54 @@ Up from 56 at the previous checkpoint.
 | `DashboardTests` | 4 | customer status buckets, staff search and status filter |
 | `AssistantExtractionTests` | 6 | guests, dates, location, booking reference parsing |
 | `AssistantTests` | 15 | confirmation gating, tool-layer scope, cross-customer isolation |
+| `PdfIngestionTests` | 7 | real extraction, chunking, page metadata, cache derivation |
+| `PdfGroundedAnswerTests` | 9 | answers traced to PDF evidence with page citations |
+| `PdfUploadTests` | 10 | validation, traversal, replacement re-index, hotel isolation |
+
+---
+
+## 4. Section 7 corrected — the PDF is now genuinely the source of truth
+
+**The previous 17-mark claim for §7 was not supportable and has been fixed.**
+Until this phase the retriever indexed `data/hotel_knowledge.json`, a
+hand-maintained file. The PDF sat in `data/` unused. There was no extraction, no
+chunking, no upload and no hotel-to-document association, so the requirement to
+answer "strictly using information from an uploaded PDF" was not met.
+
+**What was built**
+
+| Requirement | Implementation |
+|---|---|
+| PDF extraction dependency | `pypdf` in `requirements.txt`; install with `python -m pip install -r requirements.txt` |
+| Ingest the supplied PDF on startup | `ingest.ensure_seed_document()` places `data/AROHAK_Hotel_Information_For_RAG.pdf` for the seeded hotel; `load_index()` extracts and indexes it |
+| Extract text from the real PDF | `extract_pages()` via pypdf — 4 pages, ~7,900 characters |
+| Traceable chunks | `chunk_pages()` splits at the document's own headings — 15 chunks |
+| Page and section metadata | Every chunk carries `section` and `page`; every citation reports both |
+| Index built from PDF chunks | `HotelRetriever` indexes `ingest.load_index()` output only |
+| No hand-written authoritative file | `data/hotel_knowledge.json` **deleted**; a test asserts `rag.py` never references it |
+| Cache is derived, not authoritative | `data/index_cache/<hotel_id>.json` is keyed by the PDF's SHA-256 and rebuilds automatically when deleted or when the PDF changes |
+| ADMIN-only upload/replacement | `POST /api/hotel/document` plus a Hotel PDF tab in the admin UI |
+| Validation | presence, 10 MB limit, `%PDF-` signature, `.pdf` name, safe basename, extractable text |
+| Document ↔ hotel association | `hotel_documents` table keyed by `hotel_id`; per-hotel PDF, cache and index paths |
+| Rebuild after replacement | upload re-extracts, re-indexes and calls `retriever.reload()` |
+| Selected-hotel isolation | a retriever is constructed for one `hotel_id` and reads only that hotel's document |
+| PDF never drives availability | inventory and bookings remain in SQLite; a test deactivates rooms and shows availability changes while chatbot answers do not |
+| Grounded refusal and citations kept | unchanged, now with page numbers |
+
+**Evidence from the real document.** Extraction pulls phrases that exist only in
+the PDF and in no source file — "Standard check-in time is 2:00 PM",
+"MeridianGuest", "Chhatrapati Shivaji Maharaj International Airport",
+"Skyline 18". Headings land on their true pages: Hotel Overview p1, Room
+Categories p2, Wi-Fi and Connectivity p3. Room capacities are parsed from the
+extracted table, not from Python: Deluxe King 2, Premier Sea View 3, Family
+Suite 4.
+
+**Two real bugs were found and fixed during this work.** The PDF's bullet glyph
+extracts as a control character, which was leaking into answers; it is now
+stripped. And `server.py` constructed the retriever before the stores created
+the schema, so a fresh clone crashed on startup with "no such table:
+hotel_documents" — the initialisation order is corrected and was verified by
+starting the server against an empty database directory.
 
 ---
 
@@ -117,10 +166,14 @@ Booking (20). Detail in the previous checkpoint; all tests still green.
 - Scoped per user: the assistant cannot read or cancel another customer's
   booking even when given the reference.
 
-### §7 RAG Chatbot — 17 marks — COMPLETE
+### §7 RAG Chatbot — 17 marks — COMPLETE, now PDF-backed
 
-Retrieval, grounding, citations and refusal all verified, now with the FAQ
-content and the three correctness fixes above. 19 tests.
+Text is extracted from the actual supplied PDF, chunked with page and section
+metadata, and indexed. Answers quote the extracted text and cite section and
+page. Absent information is refused. Admin upload replaces the document and
+rebuilds that hotel's index. 45 tests across `RagTests`,
+`RagCorrectnessTests`, `PdfIngestionTests`, `PdfGroundedAnswerTests` and
+`PdfUploadTests`.
 
 ---
 
@@ -133,7 +186,7 @@ content and the three correctness fixes above. 19 tests.
 | §3 Customer Booking | 20 | Complete |
 | §4 Booking Dashboards | 3 | Complete |
 | §6 AI Booking Chatbot | 20 | Complete |
-| §7 RAG Chatbot | 17 | Complete |
+| §7 RAG Chatbot | 17 | Complete — PDF-backed, evidence in section 4 |
 | **§5 Multi-Organization** | **10** | **Not started — schema only** |
 
 **Supported: 90 of 100.** The only outstanding work is §5, deliberately deferred
@@ -159,7 +212,8 @@ Organization -> Hotel -> Room -> Booking
 | `auth.py` | Password hashing, sessions, role authorization helpers |
 | `hotel.py` | Hotel and individual room management |
 | `booking.py` | Availability, atomic booking, cancellation lifecycle |
-| `rag.py` | Grounded extractive retrieval over the hotel PDF |
+| `ingest.py` | PDF extraction, chunking, validation, per-hotel indexing |
+| `rag.py` | Grounded extractive retrieval over the extracted PDF chunks |
 | `assistant.py` | Controlled booking assistant and its tool layer |
 | `server.py` | Routing, cookie sessions, server-side authorization |
 | `static/` | Role-aware single-page UI |
@@ -236,7 +290,25 @@ Live server on port 8097, `HOTEL_DB` outside the repository, then terminated.
 
 ---
 
-## 11. Changed files this phase
+## 11. Changed files this phase (PDF ingestion)
+
+| File | Change |
+|---|---|
+| `ingest.py` | New — extraction, chunking, validation, per-hotel index and cache |
+| `requirements.txt` | New — `pypdf>=4.0` |
+| `rag.py` | Indexes PDF chunks instead of a JSON file; citations carry page numbers; global stemming; position tiebreak |
+| `db.py` | `hotel_documents` table |
+| `server.py` | `GET`/`POST /api/hotel/document`; fixed startup initialisation order |
+| `static/index.html` | Admin Hotel PDF panel |
+| `static/app.js` | Upload handler, document metadata, page numbers in citations |
+| `tests/test_app.py` | 94 → 120 tests; ingestion isolated per test via `HOTEL_DB` |
+| `data/hotel_knowledge.json` | **Deleted** — no longer authoritative |
+| `.gitignore` | `data/documents/`, `data/index_cache/`, `data/hotel_knowledge.json` |
+| `README.md` | Install step, PDF ingestion documentation, endpoints |
+
+---
+
+## 12. Previous phase changed files
 
 | File | Change |
 |---|---|
@@ -252,7 +324,7 @@ Live server on port 8097, `HOTEL_DB` outside the repository, then terminated.
 
 ---
 
-## 12. Update protocol
+## 13. Update protocol
 
 1. Update after every completed phase and before every push.
 2. Refresh: commit hash, test result, implemented requirements, missing items.

@@ -44,7 +44,8 @@ const TABS = {
                  ['manage-rooms', 'Rooms'], ['search', 'Availability'], ['chat', 'Hotel info']],
   ADMIN: [['staff-bookings', 'Bookings'], ['cancellations', 'Cancellations'],
           ['manage-rooms', 'Rooms'], ['manage-hotel', 'Hotel'],
-          ['search', 'Availability'], ['chat', 'Hotel info']],
+          ['manage-document', 'Hotel PDF'], ['search', 'Availability'],
+          ['chat', 'Hotel info']],
 };
 
 function showTab(id) {
@@ -56,6 +57,7 @@ function showTab(id) {
   if (id === 'cancellations') loadCancellations();
   if (id === 'manage-rooms') loadRoomsAdmin();
   if (id === 'manage-hotel') fillHotelForm();
+  if (id === 'manage-document') loadDocument();
 }
 
 function buildTabs() {
@@ -382,6 +384,45 @@ $('#room-form').onsubmit = async e => {
   } catch (err) { toast(err.message, true); }
 };
 
+/* ---------------- hotel PDF (admin) ---------------- */
+
+async function loadDocument() {
+  const box = $('#doc-info');
+  box.textContent = '';
+  try {
+    const doc = (await api('/api/hotel/document')).document;
+    if (!doc) { box.append(el('p', 'notice', 'No document indexed yet.')); return; }
+    const card = el('article', 'card');
+    const body = el('div');
+    body.append(el('h3', null, doc.original_name));
+    body.append(el('p', 'muted', doc.pages + ' page(s) · ' + doc.chunk_count + ' indexed sections'));
+    body.append(el('p', 'muted', 'Indexed ' + doc.uploaded_at));
+    body.append(el('span', 'badge status-ACTIVE', 'Source of truth for the chatbot'));
+    card.append(body);
+    box.append(card);
+  } catch (err) { box.append(el('p', 'notice', err.message)); }
+}
+
+$('#doc-form').onsubmit = async e => {
+  e.preventDefault();
+  $('#doc-error').textContent = '';
+  const file = $('#doc-file').files[0];
+  if (!file) return;
+  try {
+    // Raw PDF body keeps the server free of a multipart parser.
+    const res = await fetch('/api/hotel/document', {
+      method: 'POST', credentials: 'same-origin',
+      headers: { 'Content-Type': 'application/pdf', 'X-Filename': file.name },
+      body: file,
+    });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) throw new Error(data.error || 'Upload failed');
+    toast('Indexed ' + data.document.pages + ' page(s) into ' + data.indexed_chunks + ' sections.');
+    e.target.reset();
+    loadDocument();
+  } catch (err) { $('#doc-error').textContent = err.message; }
+};
+
 /* ---------------- grounded hotel chat ---------------- */
 
 function message(text, type, citations) {
@@ -389,7 +430,8 @@ function message(text, type, citations) {
   if (type === 'assistant') art.append(el('span', 'avatar', 'M'));
   const body = el('div');
   body.append(el('p', null, text));
-  (citations || []).forEach(c => body.append(el('span', 'citation', 'Source: ' + c.section)));
+  (citations || []).forEach(c => body.append(el('span', 'citation',
+    'Source: ' + c.section + (c.page ? ' (page ' + c.page + ')' : ''))));
   art.append(body);
   $('#messages').append(art);
   $('#messages').scrollTop = $('#messages').scrollHeight;

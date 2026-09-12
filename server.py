@@ -14,20 +14,24 @@ from urllib.parse import parse_qs, urlparse
 
 import auth
 import db
+import ingest
 from assistant import BookingAssistant, ToolLayer
 from auth import AuthError, AuthStore, PermissionError_, require_role, require_user
 from booking import BookingStore
 from hotel import HotelStore
+from ingest import IngestionError
 from rag import HotelRetriever
 
 ROOT = Path(__file__).parent
 STATIC = ROOT / "static"
 COOKIE_NAME = "session"
 
-retriever = HotelRetriever()
+# The stores create the schema, so they must exist before the retriever, which
+# records the ingested document against the hotel.
 auth_store = AuthStore()
 hotels = HotelStore()
 bookings = BookingStore()
+retriever = HotelRetriever()
 # The assistant reaches application data only through this tool layer.
 assistant = BookingAssistant(ToolLayer(bookings, hotels))
 
@@ -95,6 +99,9 @@ class Handler(BaseHTTPRequestHandler):
             if route == "/api/hotel":
                 return self.send_json(200, {"hotel": hotels.get_hotel()})
 
+            if route == "/api/hotel/document":
+                return self.send_json(200, {"document": ingest.document_info(db.DEFAULT_HOTEL_ID)})
+
             if route == "/api/rooms":
                 user = self.current_user()
                 # Staff see every room including deactivated ones; guests and
@@ -160,9 +167,29 @@ class Handler(BaseHTTPRequestHandler):
 
     # ---------- POST ----------
 
+    def read_body(self, limit):
+        length = int(self.headers.get("Content-Length", "0"))
+        if length <= 0:
+            raise ValueError("No file was supplied.")
+        if length > limit:
+            raise ValueError(f"The file is larger than the {limit // (1024 * 1024)} MB limit.")
+        return self.rfile.read(length)
+
     def do_POST(self):
         route = urlparse(self.path).path
         try:
+            if route == "/api/hotel/document":
+                # Raw PDF body, so no multipart parser is needed.
+                require_role(self.current_user(), "ADMIN")
+                data = self.read_body(ingest.MAX_PDF_BYTES + 1024)
+                name = self.headers.get("X-Filename", "document.pdf")
+                record = ingest.ingest_pdf_bytes(db.DEFAULT_HOTEL_ID, data, name)
+                chunks = retriever.reload()
+                return self.send_json(201, {"document": {
+                    "hotel_id": record["hotel_id"], "original_name": record["original_name"],
+                    "pages": record["pages"], "chunk_count": record["chunk_count"],
+                    "uploaded_at": record["generated_at"]}, "indexed_chunks": chunks})
+
             payload = self.read_json()
 
             if route == "/api/auth/register":
@@ -220,7 +247,7 @@ class Handler(BaseHTTPRequestHandler):
                 return self.send_json(200, {"booking": bookings.review_cancellation(match.group(1), approve)})
 
             return self.send_json(404, {"error": "Endpoint not found."})
-        except AuthError as exc:
+        except (AuthError, IngestionError) as exc:
             return self.send_json(400, {"error": str(exc)})
         except PermissionError_ as exc:
             return self.send_json(401 if not self.current_user() else 403, {"error": str(exc)})

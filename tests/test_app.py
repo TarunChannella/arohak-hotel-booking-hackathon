@@ -8,7 +8,13 @@ from datetime import date, timedelta
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
 
+import json
+import pathlib
+
 import auth as auth_module
+import db
+import ingest
+import rag as rag_module
 from auth import AuthError, AuthStore, PermissionError_, is_staff, require_role
 from assistant import (BookingAssistant, ToolLayer, extract_booking_id,
                        extract_dates, extract_guests, extract_location)
@@ -23,11 +29,17 @@ class TempDbTest(unittest.TestCase):
     def setUp(self):
         self.dir = tempfile.mkdtemp()
         self.db = os.path.join(self.dir, "test.db")
+        self._previous_db = os.environ.get("HOTEL_DB")
+        os.environ["HOTEL_DB"] = self.db
         self.auth = AuthStore(self.db)
         self.hotels = HotelStore(self.db)
         self.bookings = BookingStore(self.db)
 
     def tearDown(self):
+        if self._previous_db is None:
+            os.environ.pop("HOTEL_DB", None)
+        else:
+            os.environ["HOTEL_DB"] = self._previous_db
         shutil.rmtree(self.dir, ignore_errors=True)
 
     def customer(self, email="guest@example.com"):
@@ -464,10 +476,10 @@ class CancellationTests(TempDbTest):
 # Grounded PDF chatbot (preserved from the starter)
 # --------------------------------------------------------------------------
 
-class RagTests(unittest.TestCase):
-    @classmethod
-    def setUpClass(cls):
-        cls.rag = HotelRetriever()
+class RagTests(TempDbTest):
+    def setUp(self):
+        super().setUp()
+        self.rag = HotelRetriever()
 
     def test_grounded_checkin(self):
         result = self.rag.answer("What time is check in?")
@@ -506,10 +518,10 @@ class RagTests(unittest.TestCase):
 # Grounded chatbot correctness (defects reported in browser QA)
 # --------------------------------------------------------------------------
 
-class RagCorrectnessTests(unittest.TestCase):
-    @classmethod
-    def setUpClass(cls):
-        cls.rag = HotelRetriever()
+class RagCorrectnessTests(TempDbTest):
+    def setUp(self):
+        super().setUp()
+        self.rag = HotelRetriever()
 
     def test_checkin_answer_leads_with_checkin_not_checkout(self):
         for question in ("What time is check-in?", "What time is check in?", "When is checkin?"):
@@ -797,6 +809,277 @@ class AssistantTests(TempDbTest):
         reply = self.say("what is the weather in Paris")
         self.assertFalse(reply["requires_confirmation"])
         self.assertIn("I can search for rooms", reply["reply"])
+
+
+def build_minimal_pdf(lines):
+    """Build a small but valid text PDF so upload tests use real extraction."""
+    content = ["BT", "/F1 12 Tf", "50 740 Td", "14 TL"]
+    for line in lines:
+        escaped = str(line).replace("\\", "").replace("(", "").replace(")", "")
+        content.append(f"({escaped}) Tj T*")
+    content.append("ET")
+    stream = "\n".join(content).encode("latin-1", "replace")
+
+    objects = [
+        b"<< /Type /Catalog /Pages 2 0 R >>",
+        b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
+        b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] "
+        b"/Resources << /Font << /F1 5 0 R >> >> /Contents 4 0 R >>",
+        b"<< /Length " + str(len(stream)).encode() + b" >>\nstream\n" + stream + b"\nendstream",
+        b"<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>",
+    ]
+    out = bytearray(b"%PDF-1.4\n")
+    offsets = []
+    for number, body in enumerate(objects, start=1):
+        offsets.append(len(out))
+        out += str(number).encode() + b" 0 obj\n" + body + b"\nendobj\n"
+    xref_at = len(out)
+    out += b"xref\n0 " + str(len(objects) + 1).encode() + b"\n0000000000 65535 f \n"
+    for offset in offsets:
+        out += f"{offset:010d} 00000 n \n".encode()
+    out += (b"trailer\n<< /Size " + str(len(objects) + 1).encode() +
+            b" /Root 1 0 R >>\nstartxref\n" + str(xref_at).encode() + b"\n%%EOF\n")
+    return bytes(out)
+
+
+
+# --------------------------------------------------------------------------
+# Section 7 — PDF ingestion: the PDF is the source of truth
+# --------------------------------------------------------------------------
+
+class PdfIngestionTests(TempDbTest):
+    """Every test here runs the actual supplied hotel PDF through ingest.py."""
+
+    def test_supplied_pdf_exists_and_text_is_extracted(self):
+        self.assertTrue(ingest.SUPPLIED_PDF.exists(), ingest.SUPPLIED_PDF)
+        pages = ingest.extract_pages(ingest.SUPPLIED_PDF)
+        self.assertEqual(len(pages), 4)
+        combined = " ".join(text for _, text in pages)
+        # Phrases that exist only in the PDF, not in any Python source file.
+        for phrase in ("Standard check-in time is 2:00 PM",
+                       "MeridianGuest",
+                       "Chhatrapati Shivaji Maharaj International Airport",
+                       "Skyline 18"):
+            self.assertIn(phrase, combined, f"missing from extracted PDF text: {phrase}")
+
+    def test_index_is_built_from_extracted_pdf_chunks(self):
+        chunks, pages = ingest.build_index(ingest.SUPPLIED_PDF)
+        self.assertEqual(pages, 4)
+        self.assertGreaterEqual(len(chunks), 10)
+        for chunk in chunks:
+            self.assertIn("section", chunk)
+            self.assertIn("page", chunk)
+            self.assertIn("text", chunk)
+            self.assertTrue(1 <= chunk["page"] <= 4)
+            self.assertTrue(chunk["text"].strip())
+        headings = [c["section"] for c in chunks]
+        for expected in ("1. Hotel Overview", "4. Room Categories",
+                         "9. Wi-Fi and Connectivity", "11. Frequently Asked Questions"):
+            self.assertIn(expected, headings)
+
+    def test_headings_keep_the_page_they_came_from(self):
+        chunks, _ = ingest.build_index(ingest.SUPPLIED_PDF)
+        pages = {c["section"]: c["page"] for c in chunks}
+        self.assertEqual(pages["1. Hotel Overview"], 1)
+        self.assertEqual(pages["4. Room Categories"], 2)
+        self.assertEqual(pages["9. Wi-Fi and Connectivity"], 3)
+
+    def test_room_capacities_are_parsed_from_the_pdf_table(self):
+        chunks, _ = ingest.build_index(ingest.SUPPLIED_PDF)
+        capacities = ingest.room_capacities(chunks)
+        self.assertEqual(capacities["Deluxe King"], 2)
+        self.assertEqual(capacities["Premier Sea View"], 3)
+        self.assertEqual(capacities["Family Suite"], 4)
+
+    def test_no_hand_written_knowledge_file_is_used(self):
+        legacy = pathlib.Path(ingest.__file__).parent / "data" / "hotel_knowledge.json"
+        self.assertFalse(legacy.exists(),
+                         "hotel_knowledge.json must not be the authoritative source")
+        source = pathlib.Path(rag_module.__file__).read_text(encoding="utf-8")
+        self.assertNotIn("hotel_knowledge", source)
+
+    def test_cache_is_derived_from_the_pdf_and_rebuilds_when_deleted(self):
+        ingest.load_index()
+        cache = ingest.cache_path(db.DEFAULT_HOTEL_ID)
+        self.assertTrue(cache.exists())
+        record = json.loads(cache.read_text(encoding="utf-8"))
+        self.assertEqual(record["source_sha256"],
+                         ingest.file_digest(ingest.stored_pdf_path(db.DEFAULT_HOTEL_ID)))
+        cache.unlink()
+        self.assertTrue(ingest.load_index())      # rebuilt from the PDF
+        self.assertTrue(cache.exists())
+
+    def test_document_is_associated_with_the_hotel_id(self):
+        ingest.load_index()
+        info = ingest.document_info(db.DEFAULT_HOTEL_ID)
+        self.assertEqual(info["hotel_id"], db.DEFAULT_HOTEL_ID)
+        self.assertEqual(info["pages"], 4)
+        self.assertGreaterEqual(info["chunk_count"], 10)
+
+
+class PdfGroundedAnswerTests(TempDbTest):
+    def setUp(self):
+        super().setUp()
+        self.rag = HotelRetriever()
+
+    def chunk_text(self):
+        return " ".join(c["text"] for c in self.rag.sections)
+
+    def test_index_came_from_the_pdf(self):
+        self.assertGreaterEqual(len(self.rag.sections), 10)
+        self.assertIn("MeridianGuest", self.chunk_text())
+
+    def test_checkin_answer_is_pdf_evidence_with_page_citation(self):
+        result = self.rag.answer("What time is check-in?")
+        self.assertTrue(result["grounded"])
+        self.assertIn("2:00 PM", result["answer"])
+        self.assertNotIn("12:00 PM", result["answer"])
+        citation = result["citations"][0]
+        self.assertIn("Check-in", citation["section"])
+        self.assertEqual(citation["page"], 1)
+        # The answer sentence is present verbatim in the extracted PDF text.
+        self.assertIn(result["answer"].rstrip("."), self.chunk_text())
+
+    def test_wifi_answer_is_pdf_evidence_with_page_citation(self):
+        result = self.rag.answer("Is Wi-Fi free?")
+        self.assertTrue(result["grounded"])
+        self.assertIn("wi-fi", result["answer"].lower())
+        self.assertTrue(all(c["page"] for c in result["citations"]))
+
+    def test_parking_answer_is_pdf_evidence_with_page_citation(self):
+        result = self.rag.answer("Is parking free?")
+        self.assertTrue(result["grounded"])
+        self.assertIn("complimentary", result["answer"].lower())
+        self.assertEqual(result["citations"][0]["page"], 3)
+
+    def test_cancellation_answer_is_pdf_evidence(self):
+        result = self.rag.answer("What is the cancellation policy?")
+        self.assertTrue(result["grounded"])
+        self.assertIn("Cancellation", result["citations"][0]["section"])
+        self.assertEqual(result["citations"][0]["page"], 2)
+
+    def test_named_room_capacity_comes_from_the_pdf_table(self):
+        result = self.rag.answer("Can four guests stay in a Deluxe King room?")
+        self.assertTrue(result["answer"].startswith("No."))
+        self.assertIn("maximum capacity of 2", result["answer"])
+        self.assertIn("Room Categories", result["citations"][0]["section"])
+
+    def test_every_grounded_answer_reports_section_and_page(self):
+        for question in ("What time is check-in?", "Is Wi-Fi free?", "Is parking free?",
+                         "What is the cancellation policy?", "Is there a swimming pool?"):
+            result = self.rag.answer(question)
+            with self.subTest(question=question):
+                self.assertTrue(result["grounded"])
+                for citation in result["citations"]:
+                    self.assertTrue(citation["section"])
+                    self.assertTrue(citation["page"])
+                    self.assertTrue(citation["excerpt"])
+
+    def test_information_absent_from_the_pdf_is_refused(self):
+        for question in ("Does the hotel have a casino?", "Is there a golf course?",
+                         "What is the helipad fee?"):
+            result = self.rag.answer(question)
+            with self.subTest(question=question):
+                self.assertFalse(result["grounded"])
+                self.assertIn("not available", result["answer"])
+                self.assertEqual(result["citations"], [])
+
+    def test_pdf_content_does_not_drive_availability(self):
+        """The PDF lists five room categories; availability comes from SQLite."""
+        check_in = (date.today() + timedelta(days=3)).isoformat()
+        check_out = (date.today() + timedelta(days=5)).isoformat()
+        before = len(self.bookings.search(check_in, check_out, 2))
+        for room in self.bookings.search(check_in, check_out, 1):
+            self.hotels.set_room_status(room["room_id"], "INACTIVE")
+        after = len(self.bookings.search(check_in, check_out, 2))
+        self.assertGreater(before, 0)
+        self.assertEqual(after, 0)
+        # The chatbot still answers from the PDF, unaffected by live inventory.
+        self.assertTrue(self.rag.answer("What time is check-in?")["grounded"])
+
+
+class PdfUploadTests(TempDbTest):
+    def test_non_pdf_upload_is_rejected(self):
+        with self.assertRaisesRegex(ingest.IngestionError, "not a PDF"):
+            ingest.ingest_pdf_bytes(db.DEFAULT_HOTEL_ID, b"#!/bin/sh\nrm -rf /", "evil.sh")
+
+    def test_empty_upload_is_rejected(self):
+        with self.assertRaisesRegex(ingest.IngestionError, "No file"):
+            ingest.ingest_pdf_bytes(db.DEFAULT_HOTEL_ID, b"", "empty.pdf")
+
+    def test_oversized_upload_is_rejected(self):
+        oversized = b"%PDF-" + b"0" * (ingest.MAX_PDF_BYTES + 1)
+        with self.assertRaisesRegex(ingest.IngestionError, "larger than"):
+            ingest.ingest_pdf_bytes(db.DEFAULT_HOTEL_ID, oversized, "big.pdf")
+
+    def test_pdf_without_extractable_text_is_rejected(self):
+        # Valid PDF header but no page text: a scanned image would look like this.
+        with self.assertRaises(ingest.IngestionError):
+            ingest.ingest_pdf_bytes(db.DEFAULT_HOTEL_ID, b"%PDF-1.4\n%%EOF\n", "scan.pdf")
+
+    def test_a_rejected_upload_leaves_the_existing_index_intact(self):
+        ingest.load_index()
+        before = ingest.file_digest(ingest.stored_pdf_path(db.DEFAULT_HOTEL_ID))
+        with self.assertRaises(ingest.IngestionError):
+            ingest.ingest_pdf_bytes(db.DEFAULT_HOTEL_ID, b"not a pdf at all", "bad.pdf")
+        self.assertEqual(ingest.file_digest(ingest.stored_pdf_path(db.DEFAULT_HOTEL_ID)), before)
+        self.assertTrue(self.hotels and HotelRetriever().answer("What time is check-in?")["grounded"])
+
+    def test_traversal_filenames_are_neutralised(self):
+        for nasty in ("../../server.py", "..\\..\\windows\\system32\\cfg.pdf", "/etc/passwd"):
+            with self.subTest(nasty=nasty):
+                cleaned = ingest.safe_name(nasty)
+                self.assertNotIn("/", cleaned)
+                self.assertNotIn("\\", cleaned)
+                self.assertFalse(cleaned.startswith("."))
+
+    def test_stored_pdf_stays_inside_the_documents_directory(self):
+        path = ingest.stored_pdf_path("../../escape")
+        self.assertEqual(path.parent.resolve(), ingest.documents_dir().resolve())
+
+    def test_replacing_the_pdf_rebuilds_the_index(self):
+        retriever = HotelRetriever()
+        self.assertTrue(retriever.answer("Is Wi-Fi free?")["grounded"])
+        replacement = build_minimal_pdf([
+            "Hotel Rules", "1. Pet Policy",
+            "Guests may bring one small dog.",
+            "A cleaning fee of INR 2,000 applies per stay."])
+        record = ingest.ingest_pdf_bytes(db.DEFAULT_HOTEL_ID, replacement, "rules.pdf")
+        self.assertEqual(record["hotel_id"], db.DEFAULT_HOTEL_ID)
+        retriever.reload()
+        combined = " ".join(c["text"] for c in retriever.sections)
+        self.assertIn("dog", combined.lower())
+        self.assertNotIn("MeridianGuest", combined)
+        # Content that is no longer in the document must now be refused.
+        self.assertFalse(retriever.answer("What is the guest Wi-Fi network name?")["grounded"])
+
+    def test_replacement_updates_the_document_record_for_the_hotel(self):
+        replacement = build_minimal_pdf([
+            "Hotel Rules", "1. Pet Policy", "One small dog is allowed per room."])
+        ingest.ingest_pdf_bytes(db.DEFAULT_HOTEL_ID, replacement, "rules.pdf")
+        info = ingest.document_info(db.DEFAULT_HOTEL_ID)
+        self.assertEqual(info["original_name"], "rules.pdf")
+        self.assertEqual(info["hotel_id"], db.DEFAULT_HOTEL_ID)
+
+    def test_each_hotel_has_its_own_document_and_index(self):
+        """A retriever is bound to one hotel and never reads another's PDF."""
+        other = "HOTEL-TWO"
+        with db.connect(self.db) as conn:
+            conn.execute("INSERT INTO hotels VALUES (?,?,?,?,?,?,?,?,?)",
+                         (other, db.DEFAULT_ORG_ID, "Second Hotel", "1 Other Road",
+                          "Pune", "", "", "", "ACTIVE"))
+        ingest.ingest_pdf_bytes(other, build_minimal_pdf([
+            "Second Hotel", "1. Pool Policy",
+            "The rooftop pool is open from 7:00 AM to 8:00 PM."]), "second.pdf")
+        first = HotelRetriever(db.DEFAULT_HOTEL_ID)
+        second = HotelRetriever(other)
+        self.assertIn("MeridianGuest", " ".join(c["text"] for c in first.sections))
+        self.assertNotIn("MeridianGuest", " ".join(c["text"] for c in second.sections))
+        self.assertIn("rooftop pool", " ".join(c["text"] for c in second.sections).lower())
+        self.assertNotEqual(ingest.stored_pdf_path(db.DEFAULT_HOTEL_ID),
+                            ingest.stored_pdf_path(other))
+        # The second hotel's document does not answer the first hotel's questions.
+        self.assertFalse(second.answer("What is the guest Wi-Fi network name?")["grounded"])
 
 
 if __name__ == "__main__":

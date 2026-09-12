@@ -78,6 +78,15 @@ CREATE TABLE IF NOT EXISTS bookings (
         CHECK (status IN ('CONFIRMED','CANCELLED','COMPLETED','CANCELLATION_REQUESTED'))
 );
 
+CREATE TABLE IF NOT EXISTS hotel_documents (
+    hotel_id TEXT PRIMARY KEY REFERENCES hotels(id),
+    original_name TEXT NOT NULL,
+    pages INTEGER NOT NULL,
+    chunk_count INTEGER NOT NULL,
+    sha256 TEXT NOT NULL,
+    uploaded_at TEXT NOT NULL
+);
+
 CREATE INDEX IF NOT EXISTS idx_bookings_room_dates ON bookings(room_id, check_in, check_out);
 CREATE INDEX IF NOT EXISTS idx_bookings_customer ON bookings(customer_id);
 CREATE INDEX IF NOT EXISTS idx_sessions_user ON sessions(user_id);

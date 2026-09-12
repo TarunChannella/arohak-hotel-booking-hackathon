@@ -2,3 +2,8 @@ __pycache__/
 *.py[cod]
 data/*.db
 .DS_Store
+
+# Generated artefacts
+data/documents/
+data/index_cache/
+data/hotel_knowledge.json

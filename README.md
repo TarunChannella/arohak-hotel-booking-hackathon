@@ -8,16 +8,24 @@ assistant, and a grounded PDF chatbot.
 Requirements: [docs/AROHAK_PROBLEM_STATEMENT.md](docs/AROHAK_PROBLEM_STATEMENT.md)
 Current state: [PROJECT_STATUS.md](PROJECT_STATUS.md)
 
-## Run
+## Install
 
-Python 3.10+ is the only requirement. There are no third-party packages, no
-build step and no API key.
+Python 3.10+ and one dependency, `pypdf`, for extracting text from the hotel PDF.
+
+```bash
+python -m pip install -r requirements.txt
+```
+
+## Run
 
 ```bash
 python server.py
 ```
 
-Open <http://127.0.0.1:8000>. The database is created and seeded on first run.
+Open <http://127.0.0.1:8000>. On first run the database is created and seeded, and
+`data/AROHAK_Hotel_Information_For_RAG.pdf` is ingested: its text is extracted,
+split into chunks that keep their heading and page number, and indexed for the
+chatbot.
 
 ```bash
 PORT=8099 python server.py                     # alternate port
@@ -45,9 +53,10 @@ be self-registered — an administrator creates them via `POST /api/staff`.
 python -m unittest discover -s tests -v
 ```
 
-94 tests: authentication and roles, hotel and room management, availability,
-booking, concurrency, the cancellation lifecycle, dashboards, the grounded
-chatbot, and the controlled booking assistant.
+120 tests: authentication and roles, hotel and room management, availability,
+booking, concurrency, the cancellation lifecycle, dashboards, PDF ingestion and
+upload validation, the grounded chatbot, and the controlled booking assistant.
+The ingestion tests run the actual supplied PDF through the real extraction path.
 
 ## Roles
 
@@ -90,6 +99,8 @@ rooms and bookings but cannot change hotel information or the room inventory.
 | POST | `/api/bookings/{id}/cancel` | owner or staff |
 | GET | `/api/cancellations` | ADMIN, RECEPTIONIST |
 | POST | `/api/bookings/{id}/approve-cancellation` · `/reject-cancellation` | ADMIN, RECEPTIONIST |
+| GET | `/api/hotel/document` | public — indexed PDF metadata |
+| POST | `/api/hotel/document` | ADMIN — replace the hotel PDF and re-index |
 | POST | `/api/assistant` | CUSTOMER — natural-language booking assistant |
 | POST | `/api/chat` | public — grounded PDF chatbot |
 
@@ -104,7 +115,8 @@ Organization -> Hotel -> Room -> Booking
 - `auth.py` — PBKDF2 password hashing, sessions, role checks
 - `hotel.py` — hotel and individual room management
 - `booking.py` — availability, atomic booking, cancellation lifecycle
-- `rag.py` — grounded retrieval over the hotel PDF
+- `ingest.py` — PDF extraction, chunking, validation and indexing
+- `rag.py` — grounded retrieval over the extracted PDF chunks
 - `assistant.py` — controlled booking assistant and its tool layer
 - `server.py` — routing and server-side authorization
 - `static/` — role-aware single-page UI
@@ -135,11 +147,32 @@ to CONFIRMED.
 with a seeded default organization, so the multi-organization extension can be
 layered on without rebuilding the MVP.
 
+**The PDF is the source of truth for the chatbot.** On startup `ingest.py`
+extracts the text of the hotel's PDF with pypdf, splits it at its own headings
+into chunks that keep their page number, and builds the retrieval index from
+those chunks. There is no hand-written knowledge file. The JSON under
+`data/index_cache/` is a derived cache keyed by the PDF's SHA-256; delete it and
+the next start rebuilds it from the PDF.
+
 **The chatbot is extractive, never generative.** Answers are whole sentences
-copied verbatim from retrieved PDF passages and returned with section citations.
-When retrieval finds nothing strong enough, it says the information is not
-available rather than inventing one. This makes hallucination structurally
-impossible and needs no API key.
+copied verbatim from the extracted PDF text and returned with the section
+heading and page number they came from. When retrieval finds nothing strong
+enough, it says the information is not available rather than inventing one. This
+makes hallucination structurally impossible and needs no API key.
+
+**Replacing the PDF re-indexes that hotel.** An admin uploads a replacement from
+the Hotel PDF tab. The upload is rejected unless it is present, within the 10 MB
+limit, carries a `%PDF-` signature and a `.pdf` name, and yields extractable
+text — a scanned image PDF is refused with an explanation rather than silently
+indexed as empty. The filename is reduced to a safe basename, so
+`../../server.py` cannot escape the documents directory, and the file is written
+to a staging path and only swapped in once extraction succeeds, so a bad upload
+leaves the working index untouched. Each hotel has its own PDF, index and cache,
+keyed by hotel id, and a retriever only ever reads its own hotel's document.
+
+**PDF content never determines availability.** Room inventory, availability and
+bookings come from SQLite. Replacing the PDF changes what the chatbot knows and
+nothing about what can be booked.
 
 **The booking assistant has no database access.** `assistant.py` may only call
 the seven methods on `ToolLayer` — `get_hotel`, `search_rooms`,
