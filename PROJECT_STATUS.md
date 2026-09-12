@@ -15,7 +15,7 @@
 | Item | Value |
 |---|---|
 | Branch | `main` |
-| Latest commit | see section 11 |
+| Latest commit | `b767f4c` — Fix RAG correctness, verify dashboards, add controlled booking assistant |
 | Remote | `https://github.com/TarunChannella/arohak-hotel-booking-hackathon.git` |
 | Pushed | **No.** Awaiting the Sprint 1 push window (12:45–1:00 PM IST). |
 
