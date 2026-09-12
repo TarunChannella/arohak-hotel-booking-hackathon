@@ -53,7 +53,7 @@ be self-registered — an administrator creates them via `POST /api/staff`.
 python -m unittest discover -s tests -v
 ```
 
-181 tests: authentication and roles, hotel and room management, availability,
+200 tests: authentication and roles, hotel and room management, availability,
 booking, concurrency, the cancellation lifecycle, dashboards, PDF ingestion and
 upload validation, the grounded chatbot, the controlled booking
 assistant, multi-organization isolation and per-hotel PDF retrieval. The

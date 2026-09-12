@@ -108,6 +108,7 @@
   <!-- ---------- signed in ---------- -->
   <div id="app" class="hidden">
     <nav id="tabs"></nav>
+    <div id="context-bar" class="context-bar hidden"></div>
 
     <section id="search" class="panel">
       <h2>Find a room</h2>
@@ -119,6 +120,7 @@
         <label>Guests<input id="guests" type="number" min="1" max="10" value="2" required></label>
         <button class="primary">Search</button>
       </form>
+      <div id="confirmation" class="cards"></div>
       <div id="rooms" class="cards"></div>
     </section>
 
@@ -150,6 +152,7 @@
     <section id="manage-hotel" class="panel">
       <h2>Hotel details</h2>
       <form id="hotel-form" class="grid-form">
+        <label>Hotel ID<input id="ht-id" readonly disabled></label>
         <label>Name<input id="ht-name" required></label>
         <label>City<input id="ht-city" required></label>
         <label class="wide">Address<input id="ht-address" required></label>

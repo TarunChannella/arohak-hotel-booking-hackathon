@@ -172,3 +172,13 @@ footer{text-align:center;color:var(--muted);font-size:12.5px;padding:26px}
   .demo-card button{width:100%}
   .messages article{max-width:96%}
 }
+
+/* ---------------- identifier chips ---------------- */
+.context-bar{display:flex;flex-wrap:wrap;gap:8px;margin:-6px 0 20px}
+.id-row{display:flex;flex-wrap:wrap;gap:8px;margin:8px 0 2px}
+.idf{display:inline-flex;align-items:center;gap:7px;background:#f1f4f2;border:1px solid var(--line);border-radius:8px;padding:4px 10px;max-width:100%}
+.idf-label{font-size:10.5px;font-weight:800;letter-spacing:.06em;text-transform:uppercase;color:var(--muted);white-space:nowrap}
+.idf-value{font-family:ui-monospace,SFMono-Regular,Consolas,monospace;font-size:12.5px;color:var(--ink);word-break:break-all}
+.context-bar .idf{background:#fff;box-shadow:var(--shadow)}
+input[readonly]{background:#f4f5f4;color:var(--muted);cursor:not-allowed}
+@media(max-width:760px){.idf{width:100%}}

@@ -1596,5 +1596,217 @@ class CustomerBrowsingScopeTests(TempDbTest):
         self.assertEqual(listed, [db.DEFAULT_HOTEL_ID])
 
 
+# --------------------------------------------------------------------------
+# Required identifiers: stored, returned, rendered and authorization-safe
+# --------------------------------------------------------------------------
+
+class RequiredIdentifierTests(TempDbTest):
+    """The six identifiers the specification requires, end to end."""
+
+    def setUp(self):
+        super().setUp()
+        self.orgs = OrganizationStore(self.db)
+        self.customer = self.customer()
+        self.check_in, self.check_out = self.dates()
+
+    def make_booking(self):
+        room = self.bookings.search(self.check_in, self.check_out, 2)[0]
+        return room, self.bookings.create(self.customer, {
+            "room_id": room["room_id"], "check_in": self.check_in,
+            "check_out": self.check_out, "guests": 2})
+
+    # ---- 1. organization id ----
+
+    def test_organization_id_is_stored_and_returned(self):
+        organizations = self.orgs.list_public()
+        self.assertTrue(organizations)
+        self.assertIn(db.DEFAULT_ORG_ID, [o["id"] for o in organizations])
+        self.assertEqual(self.customer["organization_id"], db.DEFAULT_ORG_ID)
+        _, booking = self.make_booking()
+        self.assertEqual(booking["organization_id"], db.DEFAULT_ORG_ID)
+
+    # ---- 2. hotel id and 3. contact number ----
+
+    def test_official_hotel_id_and_contact_number_are_correct(self):
+        """HGMUM001 and +91 22 4567 8900 come from the official hotel PDF."""
+        hotel = self.hotels.get_hotel()
+        self.assertEqual(hotel["id"], "HGMUM001")
+        self.assertEqual(hotel["contact_number"], "+91 22 4567 8900")
+        self.assertEqual(hotel["name"], "The Meridian Grand Mumbai")
+
+    def test_hotel_id_and_contact_number_are_returned_in_listings(self):
+        for row in self.orgs.list_hotels(self.customer, organization_id=db.DEFAULT_ORG_ID):
+            self.assertTrue(row["id"])
+            self.assertIn("contact_number", row)
+
+    def test_contact_number_survives_an_unrelated_hotel_update(self):
+        before = self.hotels.get_hotel()["contact_number"]
+        self.hotels.update_hotel({"description": "Updated description only."})
+        self.assertEqual(self.hotels.get_hotel()["contact_number"], before)
+
+    # ---- 4. room id vs room number ----
+
+    def test_room_id_and_room_number_are_distinct_and_both_present(self):
+        room = self.bookings.search(self.check_in, self.check_out, 2)[0]
+        self.assertTrue(room["room_id"].startswith("RM-"))
+        self.assertNotEqual(room["room_id"], room["room_number"])
+        self.assertFalse(room["room_number"].startswith("RM-"))
+        stored = self.hotels.get_room(room["room_id"])
+        self.assertEqual(stored["room_number"], room["room_number"])
+
+    def test_booking_carries_both_room_id_and_room_number(self):
+        room, booking = self.make_booking()
+        self.assertEqual(booking["room_id"], room["room_id"])
+        self.assertEqual(booking["room_number"], room["room_number"])
+        self.assertNotEqual(booking["room_id"], booking["room_number"])
+
+    # ---- 5. booking id ----
+
+    def test_booking_id_is_identical_across_every_view(self):
+        _, booking = self.make_booking()
+        booking_id = booking["id"]
+        self.assertEqual(self.bookings.get(booking_id)["id"], booking_id)
+        self.assertEqual([b["id"] for b in self.bookings.list_for_customer(self.customer["id"])],
+                         [booking_id])
+        self.assertEqual([b["id"] for b in self.bookings.list_all()], [booking_id])
+        receptionist = self.staff("RECEPTIONIST")
+        self.orgs.assign_receptionist(self.staff("ADMIN"), receptionist["id"], db.DEFAULT_HOTEL_ID)
+        self.assertEqual([b["id"] for b in self.bookings.list_all(
+            hotel_ids=self.orgs.accessible_hotel_ids(receptionist))], [booking_id])
+
+    def test_each_booking_gets_one_stable_unique_id(self):
+        first = self.make_booking()[1]["id"]
+        second = self.make_booking()[1]["id"]
+        self.assertNotEqual(first, second)
+        # Re-reading does not mint a new identifier.
+        self.assertEqual(self.bookings.get(first)["id"], first)
+        self.assertEqual(self.bookings.get(first)["id"], first)
+
+    def test_identifiers_are_stable_across_a_store_reload(self):
+        room, booking = self.make_booking()
+        reopened = BookingStore(self.db)
+        again = reopened.get(booking["id"])
+        for field in ("id", "customer_id", "organization_id", "hotel_id", "room_id", "room_number"):
+            self.assertEqual(again[field], booking[field], field)
+        self.assertEqual(HotelStore(self.db).get_hotel()["id"], "HGMUM001")
+
+    # ---- 6. customer id ----
+
+    def test_customer_id_is_a_real_identifier_not_an_email(self):
+        self.assertTrue(self.customer["id"].startswith("USR-"))
+        self.assertNotIn("@", self.customer["id"])
+        self.assertNotEqual(self.customer["id"], self.customer["email"])
+
+    def test_customer_id_is_returned_on_bookings_for_authorized_staff(self):
+        _, booking = self.make_booking()
+        self.assertEqual(booking["customer_id"], self.customer["id"])
+        staff_view = self.bookings.list_all()[0]
+        self.assertEqual(staff_view["customer_id"], self.customer["id"])
+
+    def test_no_password_hash_or_token_is_ever_returned(self):
+        _, booking = self.make_booking()
+        for payload in (self.customer, booking, self.bookings.list_all()[0],
+                        self.hotels.get_hotel()):
+            for leak in ("password", "password_hash", "token", "session"):
+                self.assertNotIn(leak, payload, f"{leak} leaked in {sorted(payload)[:4]}")
+
+    # ---- authorization on the identifiers ----
+
+    def test_one_customer_never_sees_another_customers_ids(self):
+        _, booking = self.make_booking()
+        intruder = self.auth.register({"name": "Other", "email": "other@example.com",
+                                       "password": "password123", "role": "CUSTOMER"})
+        self.assertEqual(self.bookings.list_for_customer(intruder["id"]), [])
+        with self.assertRaises(LookupError):
+            self.bookings.cancel(booking["id"], intruder["id"])
+
+    def test_staff_see_identifiers_only_for_hotels_they_may_access(self):
+        _, booking = self.make_booking()
+        product_admin = self.auth.register(
+            {"name": "P", "email": "p@example.com", "password": "password123",
+             "role": "PRODUCT_ADMIN"}, allow_staff=True)
+        org_b = self.orgs.create(product_admin, {"name": "Coastal"})["id"]
+        admin_b = self.auth.register(
+            {"name": "B", "email": "b@example.com", "password": "password123",
+             "role": "ORGANIZATION_ADMIN"}, allow_staff=True, organization_id=org_b)
+        # Organization B's admin sees no identifiers from organization A.
+        self.assertEqual(self.bookings.list_all(
+            hotel_ids=self.orgs.accessible_hotel_ids(admin_b)), [])
+        # The platform admin sees everything.
+        self.assertIn(booking["id"], [b["id"] for b in self.bookings.list_all(
+            hotel_ids=self.orgs.accessible_hotel_ids(product_admin))])
+
+    def test_hotel_a_identifiers_never_appear_under_hotel_b(self):
+        product_admin = self.auth.register(
+            {"name": "P", "email": "p2@example.com", "password": "password123",
+             "role": "PRODUCT_ADMIN"}, allow_staff=True)
+        org_b = self.orgs.create(product_admin, {"name": "Coastal"})["id"]
+        admin_b = self.auth.register(
+            {"name": "B", "email": "b2@example.com", "password": "password123",
+             "role": "ORGANIZATION_ADMIN"}, allow_staff=True, organization_id=org_b)
+        hotel_b = self.orgs.create_hotel(admin_b, {
+            "name": "Coastal Retreat", "city": "Goa", "address": "9 Beach Road"})["id"]
+        self.hotels.create_room({"room_number": "B1", "room_type": "Sea View",
+                                 "capacity": 2, "price_per_night": 9000}, hotel_id=hotel_b)
+        a_rooms = {r["id"] for r in self.hotels.list_rooms(db.DEFAULT_HOTEL_ID)}
+        b_rooms = {r["id"] for r in self.hotels.list_rooms(hotel_b)}
+        self.assertFalse(a_rooms & b_rooms)
+        self.assertNotEqual(self.hotels.get_hotel(hotel_b)["contact_number"],
+                            self.hotels.get_hotel(db.DEFAULT_HOTEL_ID)["contact_number"])
+        with self.assertRaises(PermissionError_):
+            self.orgs.require_hotel_access(admin_b, db.DEFAULT_HOTEL_ID)
+
+    # ---- the UI actually renders them ----
+
+    def test_frontend_renders_every_required_identifier(self):
+        """The rendering layer must label and display all six values."""
+        js = pathlib.Path("static/app.js").read_text(encoding="utf-8")
+        html = pathlib.Path("static/index.html").read_text(encoding="utf-8")
+        for label in ("'Customer ID'", "'Organization ID'", "'Hotel ID'",
+                      "'Room ID'", "'Room Number'", "'Booking ID'"):
+            self.assertIn(label, js, f"{label} is never rendered")
+        self.assertIn("Hotel contact", js)
+        self.assertIn("contact_number", js)
+        self.assertIn('id="ht-id"', html)          # hotel admin details
+        self.assertIn('id="context-bar"', html)    # per-role identity strip
+        self.assertIn('id="confirmation"', html)   # booking confirmation
+
+    def test_frontend_reads_ids_from_the_api_not_from_invented_values(self):
+        js = pathlib.Path("static/app.js").read_text(encoding="utf-8")
+        # No client-side identifier minting.
+        for forbidden in ("Math.random", "crypto.randomUUID", "Date.now() +"):
+            self.assertNotIn(forbidden, js, f"{forbidden} suggests a generated id")
+
+    # ---- existing behaviour is unaffected ----
+
+    def test_existing_rag_and_booking_behaviour_still_work(self):
+        rag = HotelRetriever()
+        checkin = rag.answer("What time is check-in?")
+        self.assertTrue(checkin["grounded"])
+        self.assertIn("2:00 PM", checkin["answer"])
+        self.assertFalse(rag.answer("Does the hotel have a casino?")["grounded"])
+        room, booking = self.make_booking()
+        self.assertEqual(booking["status"], "CONFIRMED")
+        with self.assertRaises(ValueError):
+            self.bookings.create(self.customer, {
+                "room_id": room["room_id"], "check_in": self.check_in,
+                "check_out": self.check_out, "guests": 2})
+        self.assertEqual(self.bookings.cancel(booking["id"], self.customer["id"])["status"],
+                         "CANCELLED")
+
+    def test_a_pre_existing_database_still_reads_back_every_identifier(self):
+        """Records written before this change remain fully readable."""
+        room, booking = self.make_booking()
+        with db.connect(self.db) as conn:
+            row = conn.execute(
+                "SELECT id, customer_id, organization_id, hotel_id, room_id FROM bookings WHERE id=?",
+                (booking["id"],)).fetchone()
+        self.assertEqual(row["id"], booking["id"])
+        self.assertEqual(row["customer_id"], self.customer["id"])
+        self.assertEqual(row["organization_id"], db.DEFAULT_ORG_ID)
+        self.assertEqual(row["hotel_id"], "HGMUM001")
+        self.assertEqual(row["room_id"], room["room_id"])
+
+
 if __name__ == "__main__":
     unittest.main()

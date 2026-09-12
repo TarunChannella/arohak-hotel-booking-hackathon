@@ -33,8 +33,8 @@ Overrides: `PORT`, `HOTEL_DB`, `DEMO_PASSWORD`
 
 ## 3. Test result
 
-**181 tests, 0 failures, 0 errors — OK** (Python 3.12, Windows 11, ~92s).
-Up from 156 at the previous checkpoint.
+**200 tests, 0 failures, 0 errors — OK** (Python 3.12, Windows 11, ~137s).
+Up from 181 at the previous checkpoint.
 
 | Group | Tests | Covers |
 |---|---:|---|
@@ -60,6 +60,7 @@ Up from 156 at the previous checkpoint.
 | `SelectedHotelAuthorizationTests` | 10 | cross-organization and receptionist limits |
 | `AssistantHotelScopeTests` | 3 | assistant searches and books the selected hotel |
 | `CustomerBrowsingScopeTests` | 5 | customers browse by chosen organization |
+| `RequiredIdentifierTests` | 19 | the six required identifiers: stored, returned, rendered, scoped |
 
 ---
 
