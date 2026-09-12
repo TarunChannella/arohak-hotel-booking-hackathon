@@ -13,9 +13,10 @@ from datetime import UTC, datetime, timedelta
 
 import db
 
-ROLES = ("ADMIN", "RECEPTIONIST", "CUSTOMER")
+ROLES = ("PRODUCT_ADMIN", "ORGANIZATION_ADMIN", "ADMIN", "RECEPTIONIST", "CUSTOMER")
 SELF_SERVICE_ROLES = ("CUSTOMER",)  # roles a stranger may pick at registration
-STAFF_ROLES = ("ADMIN", "RECEPTIONIST")
+# ADMIN is the original single-hotel name for an organization administrator.
+STAFF_ROLES = ("PRODUCT_ADMIN", "ORGANIZATION_ADMIN", "ADMIN", "RECEPTIONIST")
 SESSION_HOURS = 12
 PBKDF2_ROUNDS = 200_000
 EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
@@ -63,7 +64,7 @@ class AuthStore:
 
     # ---------- registration and login ----------
 
-    def register(self, payload, allow_staff=False):
+    def register(self, payload, allow_staff=False, organization_id=None):
         name = str(payload.get("name", "")).strip()
         email = str(payload.get("email", "")).strip().lower()
         password = str(payload.get("password", ""))
@@ -76,10 +77,11 @@ class AuthStore:
         if len(password) < 8:
             raise AuthError("Password must be at least 8 characters.")
         if role not in ROLES:
-            raise AuthError("Role must be ADMIN, RECEPTIONIST or CUSTOMER.")
+            raise AuthError("Role must be one of: " + ", ".join(ROLES) + ".")
         if role not in SELF_SERVICE_ROLES and not allow_staff:
             raise AuthError("Staff accounts must be created by an administrator.")
 
+        organization_id = organization_id or db.DEFAULT_ORG_ID
         user_id = "USR-" + uuid.uuid4().hex[:8].upper()
         with db.connect(self.path) as conn:
             existing = conn.execute("SELECT 1 FROM users WHERE email=?", (email,)).fetchone()
@@ -87,7 +89,7 @@ class AuthStore:
                 raise AuthError("An account with this email already exists.")
             conn.execute(
                 "INSERT INTO users VALUES (?,?,?,?,?,?,?)",
-                (user_id, db.DEFAULT_ORG_ID, name, email, hash_password(password),
+                (user_id, organization_id, name, email, hash_password(password),
                  role, _now().isoformat(timespec="seconds")),
             )
         return self.get_user(user_id)

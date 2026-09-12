@@ -20,6 +20,7 @@ from assistant import (BookingAssistant, ToolLayer, extract_booking_id,
                        extract_dates, extract_guests, extract_location)
 from booking import BookingStore
 from hotel import HotelStore
+from organization import OrganizationStore
 from rag import HotelRetriever
 
 
@@ -1080,6 +1081,269 @@ class PdfUploadTests(TempDbTest):
                             ingest.stored_pdf_path(other))
         # The second hotel's document does not answer the first hotel's questions.
         self.assertFalse(second.answer("What is the guest Wi-Fi network name?")["grounded"])
+
+
+# --------------------------------------------------------------------------
+# Section 5 — Multi-organization architecture
+# --------------------------------------------------------------------------
+
+class MultiOrganizationTest(TempDbTest):
+    """Two isolated organizations, each with its own hotels and staff."""
+
+    def setUp(self):
+        super().setUp()
+        self.orgs = OrganizationStore(self.db)
+        self.product_admin = self.auth.register(
+            {"name": "Platform", "email": "platform@example.com",
+             "password": "password123", "role": "PRODUCT_ADMIN"}, allow_staff=True)
+        # Organization A is the seeded default; B is created by the product admin.
+        self.org_a = db.DEFAULT_ORG_ID
+        self.org_b = self.orgs.create(self.product_admin, {"name": "Coastal Stays"})["id"]
+
+        self.admin_a = self.staff_in("ORGANIZATION_ADMIN", "admin.a@example.com", self.org_a)
+        self.admin_b = self.staff_in("ORGANIZATION_ADMIN", "admin.b@example.com", self.org_b)
+        self.hotel_a = db.DEFAULT_HOTEL_ID
+        self.hotel_b = self.orgs.create_hotel(self.admin_b, {
+            "name": "Coastal Retreat", "city": "Goa", "address": "9 Beach Road"})["id"]
+
+    def staff_in(self, role, email, organization_id):
+        return self.auth.register(
+            {"name": role.title(), "email": email, "password": "password123", "role": role},
+            allow_staff=True, organization_id=organization_id)
+
+
+class ProductAdminTests(MultiOrganizationTest):
+    def test_product_admin_can_create_and_list_every_organization(self):
+        listed = {o["id"] for o in self.orgs.list(self.product_admin)}
+        self.assertIn(self.org_a, listed)
+        self.assertIn(self.org_b, listed)
+
+    def test_product_admin_can_update_an_organization(self):
+        updated = self.orgs.update(self.product_admin, self.org_b, {"name": "Coastal Stays Group"})
+        self.assertEqual(updated["name"], "Coastal Stays Group")
+
+    def test_product_admin_can_deactivate_an_organization(self):
+        updated = self.orgs.update(self.product_admin, self.org_b, {"status": "INACTIVE"})
+        self.assertEqual(updated["status"], "INACTIVE")
+        self.assertNotIn(self.org_b, [o["id"] for o in self.orgs.list_public()])
+
+    def test_organization_name_and_status_are_validated(self):
+        with self.assertRaises(ValueError):
+            self.orgs.create(self.product_admin, {"name": "   "})
+        with self.assertRaises(ValueError):
+            self.orgs.update(self.product_admin, self.org_b, {"status": "PAUSED"})
+
+    def test_product_admin_sees_hotels_across_organizations(self):
+        ids = {h["id"] for h in self.orgs.list_hotels(self.product_admin)}
+        self.assertIn(self.hotel_a, ids)
+        self.assertIn(self.hotel_b, ids)
+
+
+class OrganizationAdminTests(MultiOrganizationTest):
+    def test_organization_admin_cannot_create_organizations(self):
+        with self.assertRaises(PermissionError_):
+            self.orgs.create(self.admin_a, {"name": "Sneaky Org"})
+
+    def test_organization_admin_cannot_update_another_organization(self):
+        with self.assertRaises(PermissionError_):
+            self.orgs.update(self.admin_a, self.org_b, {"name": "Hijacked"})
+
+    def test_organization_admin_only_lists_its_own_organization(self):
+        self.assertEqual([o["id"] for o in self.orgs.list(self.admin_a)], [self.org_a])
+        self.assertEqual([o["id"] for o in self.orgs.list(self.admin_b)], [self.org_b])
+
+    def test_organization_admin_cannot_read_another_organization(self):
+        with self.assertRaises(PermissionError_):
+            self.orgs.get(self.admin_a, self.org_b)
+
+    def test_organization_admin_only_sees_its_own_hotels(self):
+        self.assertEqual([h["id"] for h in self.orgs.list_hotels(self.admin_a)], [self.hotel_a])
+        self.assertEqual([h["id"] for h in self.orgs.list_hotels(self.admin_b)], [self.hotel_b])
+
+    def test_organization_admin_cannot_read_another_organizations_hotel(self):
+        with self.assertRaises(PermissionError_):
+            self.orgs.get_hotel(self.admin_a, self.hotel_b)
+
+    def test_organization_admin_cannot_act_on_another_organizations_hotel(self):
+        with self.assertRaises(PermissionError_):
+            self.orgs.require_hotel_access(self.admin_a, self.hotel_b)
+        self.orgs.require_hotel_access(self.admin_b, self.hotel_b)
+
+    def test_an_organization_can_hold_multiple_hotels(self):
+        second = self.orgs.create_hotel(self.admin_b, {
+            "name": "Coastal Annexe", "city": "Goa", "address": "11 Beach Road"})
+        ids = [h["id"] for h in self.orgs.list_hotels(self.admin_b)]
+        self.assertIn(self.hotel_b, ids)
+        self.assertIn(second["id"], ids)
+        self.assertEqual(len(ids), 2)
+
+    def test_hotel_fields_are_validated(self):
+        with self.assertRaises(ValueError):
+            self.orgs.create_hotel(self.admin_b, {"name": "", "city": "Goa", "address": "x"})
+
+    def test_a_new_hotel_belongs_to_the_creating_organization(self):
+        hotel = self.orgs.get_hotel(self.admin_b, self.hotel_b)
+        self.assertEqual(hotel["organization_id"], self.org_b)
+
+
+class ReceptionistAssignmentTests(MultiOrganizationTest):
+    def setUp(self):
+        super().setUp()
+        self.second_b = self.orgs.create_hotel(self.admin_b, {
+            "name": "Coastal Annexe", "city": "Goa", "address": "11 Beach Road"})["id"]
+        self.reception_b = self.staff_in("RECEPTIONIST", "reception.b@example.com", self.org_b)
+
+    def test_receptionist_starts_with_no_hotels(self):
+        self.assertEqual(self.orgs.assigned_hotel_ids(self.reception_b["id"]), [])
+        self.assertEqual(self.orgs.list_hotels(self.reception_b), [])
+
+    def test_admin_can_assign_a_receptionist_to_a_hotel(self):
+        assigned = self.orgs.assign_receptionist(self.admin_b, self.reception_b["id"], self.hotel_b)
+        self.assertEqual(assigned, [self.hotel_b])
+        self.assertEqual([h["id"] for h in self.orgs.list_hotels(self.reception_b)], [self.hotel_b])
+
+    def test_receptionist_is_limited_to_assigned_hotels(self):
+        self.orgs.assign_receptionist(self.admin_b, self.reception_b["id"], self.hotel_b)
+        self.orgs.require_hotel_access(self.reception_b, self.hotel_b)
+        with self.assertRaises(PermissionError_):
+            self.orgs.require_hotel_access(self.reception_b, self.second_b)
+        with self.assertRaises(PermissionError_):
+            self.orgs.get_hotel(self.reception_b, self.second_b)
+
+    def test_assignment_can_be_removed(self):
+        self.orgs.assign_receptionist(self.admin_b, self.reception_b["id"], self.hotel_b)
+        self.assertEqual(self.orgs.unassign_receptionist(
+            self.admin_b, self.reception_b["id"], self.hotel_b), [])
+        with self.assertRaises(PermissionError_):
+            self.orgs.require_hotel_access(self.reception_b, self.hotel_b)
+
+    def test_admin_cannot_assign_into_another_organization(self):
+        with self.assertRaises(PermissionError_):
+            self.orgs.assign_receptionist(self.admin_a, self.reception_b["id"], self.hotel_b)
+
+    def test_receptionist_cannot_be_assigned_across_organizations(self):
+        reception_a = self.staff_in("RECEPTIONIST", "reception.a@example.com", self.org_a)
+        with self.assertRaises(PermissionError_):
+            self.orgs.assign_receptionist(self.product_admin, reception_a["id"], self.hotel_b)
+
+    def test_only_receptionists_can_be_assigned(self):
+        with self.assertRaises(ValueError):
+            self.orgs.assign_receptionist(self.admin_b, self.admin_b["id"], self.hotel_b)
+
+    def test_a_receptionist_cannot_assign_itself(self):
+        with self.assertRaises(PermissionError_):
+            self.orgs.assign_receptionist(self.reception_b, self.reception_b["id"], self.second_b)
+
+    def test_unknown_hotel_or_user_is_rejected(self):
+        with self.assertRaises(LookupError):
+            self.orgs.assign_receptionist(self.admin_b, self.reception_b["id"], "NO-SUCH-HOTEL")
+        with self.assertRaises(LookupError):
+            self.orgs.assign_receptionist(self.admin_b, "USR-NOPE", self.hotel_b)
+
+
+class CustomerHotelSelectionTests(MultiOrganizationTest):
+    def setUp(self):
+        super().setUp()
+        self.customer = self.customer()
+        self.hotels.create_room({"room_number": "B1", "room_type": "Sea View Suite",
+                                 "capacity": 2, "price_per_night": 9000,
+                                 "description": "Balcony", "amenities": "Wi-Fi"},
+                                hotel_id=self.hotel_b)
+
+    def test_customer_browses_organizations_then_hotels(self):
+        organizations = {o["id"] for o in self.orgs.list_public()}
+        self.assertIn(self.org_a, organizations)
+        self.assertIn(self.org_b, organizations)
+        hotels_b = [h["id"] for h in self.orgs.list_hotels(organization_id=self.org_b)]
+        self.assertEqual(hotels_b, [self.hotel_b])
+
+    def test_availability_is_scoped_to_the_selected_hotel(self):
+        check_in, check_out = self.dates()
+        rooms_a = self.bookings.search(check_in, check_out, 2, hotel_id=self.hotel_a)
+        rooms_b = self.bookings.search(check_in, check_out, 2, hotel_id=self.hotel_b)
+        self.assertEqual(len(rooms_b), 1)
+        self.assertEqual(rooms_b[0]["room_number"], "B1")
+        self.assertNotIn("B1", [r["room_number"] for r in rooms_a])
+
+    def test_customer_can_book_in_the_selected_hotel(self):
+        check_in, check_out = self.dates()
+        room = self.bookings.search(check_in, check_out, 2, hotel_id=self.hotel_b)[0]
+        booking = self.bookings.create(self.customer, {
+            "room_id": room["room_id"], "check_in": check_in,
+            "check_out": check_out, "guests": 2})
+        self.assertEqual(booking["hotel_id"], self.hotel_b)
+        self.assertEqual(booking["organization_id"], self.org_b)
+        self.assertEqual(booking["total_amount"], 18000)
+
+
+class CrossOrganizationIsolationTests(MultiOrganizationTest):
+    def setUp(self):
+        super().setUp()
+        self.customer = self.customer()
+        self.hotels.create_room({"room_number": "B1", "room_type": "Sea View Suite",
+                                 "capacity": 2, "price_per_night": 9000},
+                                hotel_id=self.hotel_b)
+        check_in, check_out = self.dates()
+        room_a = self.bookings.search(check_in, check_out, 2, hotel_id=self.hotel_a)[0]
+        room_b = self.bookings.search(check_in, check_out, 2, hotel_id=self.hotel_b)[0]
+        self.booking_a = self.bookings.create(self.customer, {
+            "room_id": room_a["room_id"], "check_in": check_in,
+            "check_out": check_out, "guests": 2})
+        self.booking_b = self.bookings.create(self.customer, {
+            "room_id": room_b["room_id"], "check_in": check_in,
+            "check_out": check_out, "guests": 2})
+
+    def test_staff_booking_lists_are_scoped_to_their_organization(self):
+        ids_a = [b["id"] for b in self.bookings.list_all(
+            hotel_ids=self.orgs.accessible_hotel_ids(self.admin_a))]
+        ids_b = [b["id"] for b in self.bookings.list_all(
+            hotel_ids=self.orgs.accessible_hotel_ids(self.admin_b))]
+        self.assertEqual(ids_a, [self.booking_a["id"]])
+        self.assertEqual(ids_b, [self.booking_b["id"]])
+
+    def test_product_admin_sees_bookings_from_every_organization(self):
+        self.assertIsNone(self.orgs.accessible_hotel_ids(self.product_admin))
+        ids = [b["id"] for b in self.bookings.list_all()]
+        self.assertIn(self.booking_a["id"], ids)
+        self.assertIn(self.booking_b["id"], ids)
+
+    def test_unassigned_receptionist_sees_no_bookings(self):
+        receptionist = self.staff_in("RECEPTIONIST", "r.b@example.com", self.org_b)
+        self.assertEqual(self.bookings.list_all(
+            hotel_ids=self.orgs.accessible_hotel_ids(receptionist)), [])
+
+    def test_assigned_receptionist_sees_only_its_hotel(self):
+        receptionist = self.staff_in("RECEPTIONIST", "r.b@example.com", self.org_b)
+        self.orgs.assign_receptionist(self.admin_b, receptionist["id"], self.hotel_b)
+        ids = [b["id"] for b in self.bookings.list_all(
+            hotel_ids=self.orgs.accessible_hotel_ids(receptionist))]
+        self.assertEqual(ids, [self.booking_b["id"]])
+
+    def test_cancellation_queue_is_scoped_by_organization(self):
+        for booking in (self.booking_a, self.booking_b):
+            with db.connect(self.db) as conn:
+                conn.execute("UPDATE bookings SET status='CANCELLATION_REQUESTED' WHERE id=?",
+                             (booking["id"],))
+        ids_a = [b["id"] for b in self.bookings.list_cancellation_requests(
+            hotel_ids=self.orgs.accessible_hotel_ids(self.admin_a))]
+        self.assertEqual(ids_a, [self.booking_a["id"]])
+
+    def test_a_customer_still_sees_bookings_across_organizations(self):
+        """Customers are platform-wide; the isolation rules apply to staff."""
+        ids = {b["id"] for b in self.bookings.list_for_customer(self.customer["id"])}
+        self.assertEqual(ids, {self.booking_a["id"], self.booking_b["id"]})
+
+    def test_each_hotel_keeps_its_own_room_inventory(self):
+        rooms_a = {r["room_number"] for r in self.hotels.list_rooms(self.hotel_a)}
+        rooms_b = {r["room_number"] for r in self.hotels.list_rooms(self.hotel_b)}
+        self.assertIn("201", rooms_a)
+        self.assertEqual(rooms_b, {"B1"})
+        self.assertFalse(rooms_a & rooms_b)
+
+    def test_room_lookup_can_be_constrained_to_one_hotel(self):
+        room_b = self.hotels.list_rooms(self.hotel_b)[0]
+        self.assertIsNotNone(self.hotels.get_room(room_b["id"], hotel_id=self.hotel_b))
+        self.assertIsNone(self.hotels.get_room(room_b["id"], hotel_id=self.hotel_a))
 
 
 if __name__ == "__main__":
