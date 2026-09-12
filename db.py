@@ -26,7 +26,8 @@ CREATE TABLE IF NOT EXISTS users (
     name TEXT NOT NULL,
     email TEXT NOT NULL UNIQUE,
     password_hash TEXT NOT NULL,
-    role TEXT NOT NULL CHECK (role IN ('ADMIN','RECEPTIONIST','CUSTOMER')),
+    role TEXT NOT NULL CHECK (role IN
+        ('PRODUCT_ADMIN','ORGANIZATION_ADMIN','ADMIN','RECEPTIONIST','CUSTOMER')),
     created_at TEXT NOT NULL
 );
 
@@ -76,6 +77,13 @@ CREATE TABLE IF NOT EXISTS bookings (
     total_amount INTEGER NOT NULL,
     status TEXT NOT NULL
         CHECK (status IN ('CONFIRMED','CANCELLED','COMPLETED','CANCELLATION_REQUESTED'))
+);
+
+CREATE TABLE IF NOT EXISTS receptionist_hotels (
+    user_id TEXT NOT NULL REFERENCES users(id),
+    hotel_id TEXT NOT NULL REFERENCES hotels(id),
+    assigned_at TEXT NOT NULL,
+    PRIMARY KEY (user_id, hotel_id)
 );
 
 CREATE TABLE IF NOT EXISTS hotel_documents (

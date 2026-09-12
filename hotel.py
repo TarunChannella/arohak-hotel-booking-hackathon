@@ -50,9 +50,15 @@ class HotelStore:
             rows = conn.execute(query, (hotel_id,)).fetchall()
         return [dict(r) for r in rows]
 
-    def get_room(self, room_id):
+    def get_room(self, room_id, hotel_id=None):
+        """Fetch a room, optionally constrained to one hotel."""
+        query = "SELECT * FROM rooms WHERE id=?"
+        params = [room_id]
+        if hotel_id:
+            query += " AND hotel_id=?"
+            params.append(hotel_id)
         with db.connect(self.path) as conn:
-            row = conn.execute("SELECT * FROM rooms WHERE id=?", (room_id,)).fetchone()
+            row = conn.execute(query, params).fetchone()
         return dict(row) if row else None
 
     def create_room(self, payload, hotel_id=db.DEFAULT_HOTEL_ID):

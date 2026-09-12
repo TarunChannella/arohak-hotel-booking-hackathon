@@ -148,8 +148,14 @@ class BookingStore:
     def list_for_customer(self, customer_id):
         return self._list("WHERE b.customer_id=?", (customer_id,))
 
-    def list_all(self, status=None, query=None):
+    def list_all(self, status=None, query=None, hotel_ids=None):
+        """Staff listing. hotel_ids=None means no hotel restriction."""
         clauses, params = [], []
+        if hotel_ids is not None:
+            if not hotel_ids:
+                return []
+            clauses.append("b.hotel_id IN (" + ",".join("?" * len(hotel_ids)) + ")")
+            params.extend(hotel_ids)
         if status:
             clauses.append("b.status=?")
             params.append(status)
@@ -227,8 +233,15 @@ class BookingStore:
             conn.execute("UPDATE bookings SET status=? WHERE id=?", (new_status, booking_id))
         return self.get(booking_id)
 
-    def list_cancellation_requests(self):
-        return self._list("WHERE b.status='CANCELLATION_REQUESTED'", ())
+    def list_cancellation_requests(self, hotel_ids=None):
+        if hotel_ids is None:
+            return self._list("WHERE b.status='CANCELLATION_REQUESTED'", ())
+        if not hotel_ids:
+            return []
+        placeholders = ",".join("?" * len(hotel_ids))
+        return self._list(
+            f"WHERE b.status='CANCELLATION_REQUESTED' AND b.hotel_id IN ({placeholders})",
+            tuple(hotel_ids))
 
     def review_cancellation(self, booking_id, approve):
         """Staff decision on a late cancellation request.

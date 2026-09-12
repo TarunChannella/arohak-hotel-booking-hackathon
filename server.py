@@ -20,6 +20,7 @@ from auth import AuthError, AuthStore, PermissionError_, require_role, require_u
 from booking import BookingStore
 from hotel import HotelStore
 from ingest import IngestionError
+from organization import OrganizationStore
 from rag import HotelRetriever
 
 ROOT = Path(__file__).parent
@@ -31,11 +32,19 @@ COOKIE_NAME = "session"
 auth_store = AuthStore()
 hotels = HotelStore()
 bookings = BookingStore()
+organizations = OrganizationStore()
 retriever = HotelRetriever()
 # The assistant reaches application data only through this tool layer.
 assistant = BookingAssistant(ToolLayer(bookings, hotels))
 
+ORG_ID_RE = re.compile(r"^/api/organizations/([A-Za-z0-9\-]+)$")
+HOTEL_ID_RE = re.compile(r"^/api/hotels/([A-Za-z0-9\-]+)(/[a-z\-]+)?$")
 ROOM_ID_RE = re.compile(r"^/api/rooms/([A-Za-z0-9\-]+)(/[a-z\-]+)?$")
+
+
+def scoped_hotel_ids(user):
+    """Hotel ids a staff user may see. None means no restriction."""
+    return organizations.accessible_hotel_ids(user)
 BOOKING_ID_RE = re.compile(r"^/api/bookings/([A-Za-z0-9\-]+)(/[a-z\-]+)?$")
 
 
@@ -96,6 +105,35 @@ class Handler(BaseHTTPRequestHandler):
                 user = self.current_user()
                 return self.send_json(200, {"user": user})
 
+            if route == "/api/organizations":
+                user = self.current_user()
+                if user:
+                    return self.send_json(200, {"organizations": organizations.list(user)})
+                return self.send_json(200, {"organizations": organizations.list_public()})
+
+            if route == "/api/hotels":
+                user = self.current_user()
+                return self.send_json(200, {"hotels": organizations.list_hotels(
+                    user, organization_id=query.get("organization_id", [None])[0])})
+
+            org_match = ORG_ID_RE.match(route)
+            if org_match:
+                organization = organizations.get(require_user(self.current_user()), org_match.group(1))
+                if not organization:
+                    return self.send_json(404, {"error": "Organization not found."})
+                return self.send_json(200, {"organization": organization})
+
+            hotel_match = HOTEL_ID_RE.match(route)
+            if hotel_match and hotel_match.group(2) == "/rooms":
+                user = self.current_user()
+                return self.send_json(200, {"rooms": hotels.list_rooms(
+                    hotel_match.group(1), include_inactive=auth.is_staff(user))})
+            if hotel_match and not hotel_match.group(2):
+                hotel = organizations.get_hotel(self.current_user(), hotel_match.group(1))
+                if not hotel:
+                    return self.send_json(404, {"error": "Hotel not found."})
+                return self.send_json(200, {"hotel": hotel})
+
             if route == "/api/hotel":
                 return self.send_json(200, {"hotel": hotels.get_hotel()})
 
@@ -113,6 +151,7 @@ class Handler(BaseHTTPRequestHandler):
                     query.get("check_in", [""])[0],
                     query.get("check_out", [""])[0],
                     int(query.get("guests", ["1"])[0] or 1),
+                    hotel_id=query.get("hotel_id", [db.DEFAULT_HOTEL_ID])[0] or db.DEFAULT_HOTEL_ID,
                 )
                 return self.send_json(200, {"rooms": rooms})
 
@@ -122,22 +161,30 @@ class Handler(BaseHTTPRequestHandler):
                 if auth.is_staff(user):
                     return self.send_json(200, {"bookings": bookings.list_all(
                         status=query.get("status", [None])[0],
-                        query=query.get("q", [None])[0])})
+                        query=query.get("q", [None])[0],
+                        hotel_ids=scoped_hotel_ids(user))})
                 return self.send_json(200, {"bookings": bookings.list_for_customer(user["id"])})
 
             if route == "/api/cancellations":
-                require_role(self.current_user(), "ADMIN", "RECEPTIONIST")
-                return self.send_json(200, {"bookings": bookings.list_cancellation_requests()})
+                user = require_role(self.current_user(), *auth.STAFF_ROLES)
+                return self.send_json(200, {"bookings": bookings.list_cancellation_requests(
+                    hotel_ids=scoped_hotel_ids(user))})
 
             if route == "/api/users":
-                require_role(self.current_user(), "ADMIN")
+                require_role(self.current_user(), "PRODUCT_ADMIN", "ORGANIZATION_ADMIN", "ADMIN")
                 return self.send_json(200, {"users": auth_store.list_users()})
 
             match = BOOKING_ID_RE.match(route)
             if match and not match.group(2):
                 user = require_user(self.current_user())
                 booking = bookings.get(match.group(1))
-                if not booking or (not auth.is_staff(user) and booking["customer_id"] != user["id"]):
+                if not booking:
+                    return self.send_json(404, {"error": "Booking not found."})
+                if auth.is_staff(user):
+                    allowed = scoped_hotel_ids(user)
+                    if allowed is not None and booking["hotel_id"] not in allowed:
+                        return self.send_json(404, {"error": "Booking not found."})
+                elif booking["customer_id"] != user["id"]:
                     return self.send_json(404, {"error": "Booking not found."})
                 return self.send_json(200, {"booking": booking})
 
@@ -180,11 +227,13 @@ class Handler(BaseHTTPRequestHandler):
         try:
             if route == "/api/hotel/document":
                 # Raw PDF body, so no multipart parser is needed.
-                require_role(self.current_user(), "ADMIN")
+                user = require_role(self.current_user(), "PRODUCT_ADMIN", "ORGANIZATION_ADMIN", "ADMIN")
+                hotel_id = self.headers.get("X-Hotel-Id", db.DEFAULT_HOTEL_ID)
+                organizations.require_hotel_access(user, hotel_id)
                 data = self.read_body(ingest.MAX_PDF_BYTES + 1024)
                 name = self.headers.get("X-Filename", "document.pdf")
-                record = ingest.ingest_pdf_bytes(db.DEFAULT_HOTEL_ID, data, name)
-                chunks = retriever.reload()
+                record = ingest.ingest_pdf_bytes(hotel_id, data, name)
+                chunks = retriever.reload() if hotel_id == retriever.hotel_id else record["chunk_count"]
                 return self.send_json(201, {"document": {
                     "hotel_id": record["hotel_id"], "original_name": record["original_name"],
                     "pages": record["pages"], "chunk_count": record["chunk_count"],
@@ -206,8 +255,28 @@ class Handler(BaseHTTPRequestHandler):
                 return self.send_json(200, {"ok": True}, cookie=self.session_cookie(None, clear=True))
 
             if route == "/api/staff":
-                require_role(self.current_user(), "ADMIN")
-                return self.send_json(201, {"user": auth_store.register(payload, allow_staff=True)})
+                actor = require_role(self.current_user(), "PRODUCT_ADMIN", "ORGANIZATION_ADMIN", "ADMIN")
+                # An organization admin may only create staff inside its own
+                # organization; a product admin may target any organization.
+                target_org = payload.get("organization_id") or actor["organization_id"]
+                if actor["role"] != "PRODUCT_ADMIN" and target_org != actor["organization_id"]:
+                    raise PermissionError_("That organization is outside your access.")
+                return self.send_json(201, {"user": auth_store.register(
+                    payload, allow_staff=True, organization_id=target_org)})
+
+            if route == "/api/organizations":
+                return self.send_json(201, {"organization": organizations.create(
+                    require_user(self.current_user()), payload)})
+
+            if route == "/api/hotels":
+                return self.send_json(201, {"hotel": organizations.create_hotel(
+                    require_user(self.current_user()), payload)})
+
+            if route == "/api/assignments":
+                user = require_user(self.current_user())
+                assigned = organizations.assign_receptionist(
+                    user, str(payload.get("user_id", "")), str(payload.get("hotel_id", "")))
+                return self.send_json(201, {"hotel_ids": assigned})
 
             if route == "/api/assistant":
                 user = require_role(self.current_user(), "CUSTOMER")
@@ -221,8 +290,10 @@ class Handler(BaseHTTPRequestHandler):
                 return self.send_json(200, retriever.answer(question))
 
             if route == "/api/rooms":
-                require_role(self.current_user(), "ADMIN")
-                return self.send_json(201, {"room": hotels.create_room(payload)})
+                user = require_role(self.current_user(), "PRODUCT_ADMIN", "ORGANIZATION_ADMIN", "ADMIN")
+                hotel_id = str(payload.get("hotel_id") or db.DEFAULT_HOTEL_ID)
+                organizations.require_hotel_access(user, hotel_id)
+                return self.send_json(201, {"room": hotels.create_room(payload, hotel_id)})
 
             if route == "/api/bookings":
                 user = require_role(self.current_user(), "CUSTOMER")
@@ -230,7 +301,11 @@ class Handler(BaseHTTPRequestHandler):
 
             match = ROOM_ID_RE.match(route)
             if match and match.group(2) in ("/activate", "/deactivate"):
-                require_role(self.current_user(), "ADMIN")
+                user = require_role(self.current_user(), "PRODUCT_ADMIN", "ORGANIZATION_ADMIN", "ADMIN")
+                existing = hotels.get_room(match.group(1))
+                if not existing:
+                    raise LookupError("Room not found.")
+                organizations.require_hotel_access(user, existing["hotel_id"])
                 status = "ACTIVE" if match.group(2) == "/activate" else "INACTIVE"
                 return self.send_json(200, {"room": hotels.set_room_status(match.group(1), status)})
 
@@ -242,7 +317,11 @@ class Handler(BaseHTTPRequestHandler):
                 return self.send_json(200, {"booking": bookings.cancel(match.group(1), owner)})
 
             if match and match.group(2) in ("/approve-cancellation", "/reject-cancellation"):
-                require_role(self.current_user(), "ADMIN", "RECEPTIONIST")
+                user = require_role(self.current_user(), *auth.STAFF_ROLES)
+                target = bookings.get(match.group(1))
+                if not target:
+                    raise LookupError("Booking not found.")
+                organizations.require_hotel_access(user, target["hotel_id"])
                 approve = match.group(2) == "/approve-cancellation"
                 return self.send_json(200, {"booking": bookings.review_cancellation(match.group(1), approve)})
 
@@ -266,14 +345,31 @@ class Handler(BaseHTTPRequestHandler):
             payload = self.read_json()
 
             if route == "/api/hotel":
-                require_role(self.current_user(), "ADMIN")
-                return self.send_json(200, {"hotel": hotels.update_hotel(payload)})
+                user = require_role(self.current_user(), "PRODUCT_ADMIN", "ORGANIZATION_ADMIN", "ADMIN")
+                hotel_id = str(payload.pop("hotel_id", None) or db.DEFAULT_HOTEL_ID)
+                organizations.require_hotel_access(user, hotel_id)
+                return self.send_json(200, {"hotel": hotels.update_hotel(payload, hotel_id)})
+
+            org_match = ORG_ID_RE.match(route)
+            if org_match:
+                return self.send_json(200, {"organization": organizations.update(
+                    require_user(self.current_user()), org_match.group(1), payload)})
+
+            hotel_match = HOTEL_ID_RE.match(route)
+            if hotel_match and not hotel_match.group(2):
+                user = require_role(self.current_user(), "PRODUCT_ADMIN", "ORGANIZATION_ADMIN", "ADMIN")
+                organizations.require_hotel_access(user, hotel_match.group(1))
+                return self.send_json(200, {"hotel": hotels.update_hotel(payload, hotel_match.group(1))})
 
             match = ROOM_ID_RE.match(route)
             if match and not match.group(2):
                 # Receptionists may maintain room details and availability but
                 # may not create or remove rooms, and may not edit the hotel.
-                require_role(self.current_user(), "ADMIN", "RECEPTIONIST")
+                user = require_role(self.current_user(), *auth.STAFF_ROLES)
+                existing = hotels.get_room(match.group(1))
+                if not existing:
+                    raise LookupError("Room not found.")
+                organizations.require_hotel_access(user, existing["hotel_id"])
                 return self.send_json(200, {"room": hotels.update_room(match.group(1), payload)})
 
             return self.send_json(404, {"error": "Endpoint not found."})
