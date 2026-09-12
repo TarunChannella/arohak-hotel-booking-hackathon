@@ -15,7 +15,7 @@
 | Item | Value |
 |---|---|
 | Branch | `main` |
-| Latest commit | see section 11 |
+| Latest commit | `01f694c` — Ingest the hotel PDF as the chatbot's source of truth |
 | Remote | `https://github.com/TarunChannella/arohak-hotel-booking-hackathon.git` |
 | Pushed | **No.** Awaiting the Sprint 1 push window (12:45–1:00 PM IST). |
 
