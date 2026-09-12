@@ -35,12 +35,16 @@ class ToolLayer:
         self._bookings = bookings
         self._hotels = hotels
 
-    def get_hotel(self):
-        hotel = self._hotels.get_hotel()
+    def get_hotel(self, hotel_id=None):
+        hotel = self._hotels.get_hotel(hotel_id) if hotel_id else self._hotels.get_hotel()
+        if not hotel:
+            return None
         return {"id": hotel["id"], "name": hotel["name"], "city": hotel["city"],
                 "address": hotel["address"], "status": hotel["status"]}
 
-    def search_rooms(self, check_in, check_out, guests):
+    def search_rooms(self, check_in, check_out, guests, hotel_id=None):
+        if hotel_id:
+            return self._bookings.search(check_in, check_out, guests, hotel_id=hotel_id)
         return self._bookings.search(check_in, check_out, guests)
 
     def check_availability(self, room_id, check_in, check_out):
@@ -190,6 +194,7 @@ class BookingAssistant:
         self.tools = tools
         self._pending = {}   # user id -> the action awaiting confirmation
         self._context = {}   # user id -> last extracted search criteria
+        self._hotel = {}     # user id -> the hotel currently selected
 
     # -- helpers -------------------------------------------------
 
@@ -215,8 +220,10 @@ class BookingAssistant:
 
     # -- entry point ---------------------------------------------
 
-    def respond(self, user, message):
+    def respond(self, user, message, hotel_id=None):
+        """Answer one turn. hotel_id selects which hotel the customer is booking."""
         message = (message or "").strip()
+        self._hotel[user["id"]] = hotel_id or self._hotel.get(user["id"])
         if not message:
             return self._reply("Tell me what you need — for example, "
                                "\"I need a room in Mumbai for 2 people from Sept 20 to Sept 23.\"")
@@ -268,7 +275,9 @@ class BookingAssistant:
         return self._reply(self._describe(booking), data={"booking": booking})
 
     def _search(self, user, message):
-        hotel = self.tools.get_hotel()
+        hotel = self.tools.get_hotel(self._hotel.get(user["id"]))
+        if not hotel:
+            return self._reply("Please choose a hotel before I search for rooms.")
         location = extract_location(message, hotel["city"])
         guests = extract_guests(message)
         check_in, check_out = extract_dates(message)
@@ -295,7 +304,7 @@ class BookingAssistant:
         check_in_s = check_in.isoformat() if hasattr(check_in, "isoformat") else str(check_in)
         check_out_s = check_out.isoformat() if hasattr(check_out, "isoformat") else str(check_out)
         try:
-            rooms = self.tools.search_rooms(check_in_s, check_out_s, guests)
+            rooms = self.tools.search_rooms(check_in_s, check_out_s, guests, hotel_id=hotel["id"])
         except ValueError as exc:
             return self._reply(str(exc))
 

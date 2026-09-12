@@ -1,7 +1,7 @@
 # PROJECT STATUS — AROHAK Hotel Booking Hackathon
 
-**Last updated:** 2026-09-12 11:35 IST
-**Phase:** Sprint 1 complete — MVP, PDF ingestion, assistant, dashboards and multi-organization all implemented
+**Last updated:** 2026-09-12 12:45 IST
+**Phase:** Final functional completion — selected organization/hotel flow, per-hotel PDF RAG, role-aware UI
 **Requirements source:** [docs/AROHAK_PROBLEM_STATEMENT.md](docs/AROHAK_PROBLEM_STATEMENT.md)
 
 > No passwords, tokens, API keys or secrets are recorded in this file. Demo
@@ -33,8 +33,8 @@ Overrides: `PORT`, `HOTEL_DB`, `DEMO_PASSWORD`
 
 ## 3. Test result
 
-**156 tests, 0 failures, 0 errors — OK** (Python 3.12, Windows 11, ~90s).
-Up from 120 at the previous checkpoint.
+**181 tests, 0 failures, 0 errors — OK** (Python 3.12, Windows 11, ~92s).
+Up from 156 at the previous checkpoint.
 
 | Group | Tests | Covers |
 |---|---:|---|
@@ -56,6 +56,10 @@ Up from 120 at the previous checkpoint.
 | `CustomerHotelSelectionTests` | 3 | organization to hotel to room to booking |
 | `CrossOrganizationIsolationTests` | 8 | scoped listings, queues, inventory |
 | `DemoSeedTests` | 1 | the seeded receptionist can actually see its hotel |
+| `SelectedHotelRagTests` | 7 | per-hotel PDF isolation, replacement, missing document |
+| `SelectedHotelAuthorizationTests` | 10 | cross-organization and receptionist limits |
+| `AssistantHotelScopeTests` | 3 | assistant searches and books the selected hotel |
+| `CustomerBrowsingScopeTests` | 5 | customers browse by chosen organization |
 
 ---
 
@@ -251,6 +255,57 @@ Organization -> Hotel -> Room -> Booking
 
 ---
 
+## 9. Final functional completion (this phase)
+
+### A. Selected organization and hotel flow
+
+Organization → Hotel → Rooms → Availability → Booking is complete. The Find
+Room tab carries an organization selector and a hotel selector; the chosen pair
+persists in `localStorage` and is sent with room search, booking, every Booking
+Assistant turn and every Hotel Information question. `resolve_chat_hotel()`
+validates that the named hotel exists, is active and is within the caller's
+scope — **an unknown, inactive or out-of-scope hotel is refused rather than
+quietly replaced by the default** (verified: unknown hotel → 404).
+
+### B. Selected-hotel PDF RAG
+
+`/api/chat` and `/api/assistant` take a `hotel_id`. A retriever is built per
+hotel and cached; each reads only its own document. Citations carry hotel name,
+section heading and page. A hotel with no PDF returns a clear unavailable
+message. Admin PDF metadata and upload operate on a chosen managed hotel via a
+picker and the `X-Hotel-Id` header, and replacing one hotel's PDF rebuilds that
+hotel's index alone.
+
+**A real bug was fixed here:** `ensure_seed_document()` previously copied the
+supplied Meridian PDF into *any* hotel that lacked one, so a newly created
+hotel would have answered with another hotel's policies. Only the seeded hotel
+now receives the supplied document; every other hotel raises `MissingDocument`
+until an admin uploads its own.
+
+### C. Multi-organization workflows in the UI
+
+Organizations panel (list, create, activate/deactivate, view hotels), Hotels
+panel (list, create, jump to room management), and Receptionist Assignments
+(list receptionists in the organization, assign and unassign). Navigation is
+generated per role, so a control a role may not use is never rendered — and the
+server still authorizes every request independently.
+
+### D. Role-aware header
+
+Avatar initial, name, role badge (PRODUCT ADMIN / ORGANIZATION ADMIN / HOTEL
+ADMIN / RECEPTIONIST / CUSTOMER), current organization and hotel, and sign out.
+
+### Two customer-scoping bugs found and fixed during verification
+
+Live testing showed a customer saw only one organization and got the wrong
+hotels when browsing another organization: both `/api/organizations` and
+`list_hotels()` were scoping customers to the organization their account
+belongs to. Customers browse the platform, so they are now scoped by the
+organization they pick, while staff remain restricted to their own.
+`CustomerBrowsingScopeTests` covers this.
+
+---
+
 ## 9. Final verification (2026-09-12, fresh install)
 
 Run exactly as the README instructs, against a deleted `data/` state so the
@@ -330,33 +385,33 @@ Live server on port 8097, `HOTEL_DB` outside the repository, then terminated.
 
 ---
 
-## 11. Remaining limitations
+## 12. Remaining limitations
 
 Recorded honestly rather than claimed as complete:
 
-- **The admin UI does not expose organization CRUD or receptionist assignment.**
-  Both are implemented and tested in the backend (`POST /api/organizations`,
-  `POST /api/assignments`) but are API-only; a demo of those two needs curl or
-  the test suite rather than a click-through.
-- **Customers are platform-wide, not scoped to one organization.** A customer
-  may book in any organization's hotel. The isolation requirement in §5 concerns
-  staff access, which is enforced; this is a deliberate reading, not an
-  oversight, and a test documents the behaviour.
-- **The hotel PDF panel targets the default hotel in the UI.** The API accepts
-  an `X-Hotel-Id` header and per-hotel indexes are tested, but the admin panel
-  does not yet offer a hotel picker for the upload.
-- **The in-process retriever serves one hotel.** `server.py` holds a single
-  `HotelRetriever` for the default hotel; per-hotel retrievers are constructed
-  and tested directly, but the chat endpoint does not yet take a `hotel_id`.
-- **Browser click-through of the newest panels** (Booking assistant, Hotel PDF,
-  hotel selector) has not been done; the endpoints and JS syntax are verified.
+- **No browser click-through has been performed by me.** I have no browser in
+  this environment. Every workflow below was verified over HTTP against a
+  running server, and `node --check` validates the JavaScript syntax, but the
+  rendered DOM — tab switching, form submission, card rendering, responsive
+  layout and the browser console — has **not** been exercised. This is the one
+  item in the verification checklist I cannot honestly tick, and it is worth a
+  few minutes of your own clicking before the interview.
+- **Customers are platform-wide by design.** A customer may browse and book in
+  any organization's active hotel. The §5 isolation requirement concerns staff
+  access, which is enforced and tested; this reading is deliberate and
+  documented by `CustomerBrowsingScopeTests`.
+- **`/api/rooms` without a hotel still defaults to the seeded hotel.** The
+  hotel-scoped route `/api/hotels/{id}/rooms` is what the UI uses; the legacy
+  route is retained for compatibility.
+- **Organization deactivation does not cascade.** Hotels in a deactivated
+  organization keep their own ACTIVE status and remain individually reachable.
 - A SQLite `CHECK` constraint lists the roles, so an existing `data/hotel.db`
   created before this phase rejects the new roles. Delete it — it is git-ignored
   and reseeds automatically.
 
 ---
 
-## 12. Next action
+## 13. Next action
 
 §5 Multi-Organization (10 marks), the only remaining section:
 
@@ -368,7 +423,7 @@ Recorded honestly rather than claimed as complete:
 
 ---
 
-## 13. Changed files this phase (PDF ingestion)
+## 14. Changed files (PDF ingestion phase)
 
 | File | Change |
 |---|---|
@@ -386,7 +441,7 @@ Recorded honestly rather than claimed as complete:
 
 ---
 
-## 14. Previous phase changed files
+## 15. Earlier changed files
 
 | File | Change |
 |---|---|
@@ -402,7 +457,7 @@ Recorded honestly rather than claimed as complete:
 
 ---
 
-## 15. Update protocol
+## 16. Update protocol
 
 1. Update after every completed phase and before every push.
 2. Refresh: commit hash, test result, implemented requirements, missing items.

@@ -10,9 +10,14 @@
   <div class="brand"><span class="mark">M</span>
     <div><strong id="hotel-name">Meridian Grand</strong><small id="hotel-city">Mumbai</small></div>
   </div>
-  <div class="account">
-    <span id="who" class="who hidden"></span>
-    <button id="logout" class="link hidden">Sign out</button>
+  <div class="account hidden" id="account">
+    <span id="avatar" class="avatar-lg"></span>
+    <div class="who-block">
+      <strong id="who-name"></strong>
+      <span id="who-context" class="who"></span>
+    </div>
+    <span id="role-badge" class="badge role-badge"></span>
+    <button id="logout" class="link">Sign out</button>
   </div>
 </header>
 
@@ -61,6 +66,7 @@
     <section id="search" class="panel">
       <h2>Find a room</h2>
       <form id="search-form" class="grid-form">
+        <label>Organization<select id="org-select"></select></label>
         <label>Hotel<select id="hotel-select"></select></label>
         <label>Check-in<input id="check-in" type="date" required></label>
         <label>Check-out<input id="check-out" type="date" required></label>
@@ -130,9 +136,38 @@
       <div id="cancel-queue" class="cards"></div>
     </section>
 
+    <section id="organizations" class="panel">
+      <h2>Organizations</h2>
+      <form id="org-form" class="grid-form">
+        <label class="wide">New organization name<input id="org-name" required></label>
+        <button class="primary">Create organization</button>
+      </form>
+      <div id="org-list" class="cards"></div>
+    </section>
+
+    <section id="manage-hotels" class="panel">
+      <h2>Hotels</h2>
+      <form id="new-hotel-form" class="grid-form">
+        <label>Name<input id="nh-name" required></label>
+        <label>City<input id="nh-city" required></label>
+        <label class="wide">Address<input id="nh-address" required></label>
+        <label>Contact number<input id="nh-phone"></label>
+        <label>Email<input id="nh-email" type="email"></label>
+        <button class="primary">Add hotel</button>
+      </form>
+      <div id="hotel-list" class="cards"></div>
+    </section>
+
+    <section id="assignments" class="panel">
+      <h2>Receptionist assignments</h2>
+      <p class="muted">A receptionist can only see and manage the hotels assigned here.</p>
+      <div id="assignment-list" class="cards"></div>
+    </section>
+
     <section id="manage-document" class="panel">
       <h2>Hotel information PDF</h2>
-      <p class="muted">The chatbot answers only from this document. Replacing it re-extracts the text and rebuilds the search index for this hotel.</p>
+      <p class="muted">The chatbot answers only from this document. Replacing it re-extracts the text and rebuilds the search index for that hotel alone.</p>
+      <label class="inline-field">Managed hotel<select id="doc-hotel"></select></label>
       <div id="doc-info" class="cards"></div>
       <form id="doc-form" class="grid-form">
         <label class="wide">Replacement PDF<input id="doc-file" type="file" accept="application/pdf,.pdf" required></label>
@@ -162,6 +197,8 @@
 
     <section id="chat" class="panel">
       <h2>Hotel information</h2>
+      <p class="muted">Answers come only from the selected hotel's uploaded PDF.
+        <span id="chat-hotel" class="badge status-ACTIVE"></span></p>
       <div id="messages" class="messages">
         <article class="assistant"><span class="avatar">M</span><div>
           <p>Hello. I answer using the hotel information document only. Ask about policies, facilities, rooms or amenities.</p>
