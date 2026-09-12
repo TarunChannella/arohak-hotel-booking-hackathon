@@ -6,7 +6,15 @@ header{display:flex;align-items:center;justify-content:space-between;gap:16px;pa
 .mark{display:grid;place-items:center;width:38px;height:38px;border-radius:10px;background:var(--brand);color:var(--brand-ink);font-weight:700}
 .brand strong{display:block;line-height:1.2}
 .brand small{color:var(--muted)}
-.account{display:flex;align-items:center;gap:12px}
+.account{display:flex;align-items:center;gap:12px;flex-wrap:wrap}
+.avatar-lg{display:grid;place-items:center;width:34px;height:34px;flex:0 0 34px;border-radius:50%;background:var(--brand);color:var(--brand-ink);font-weight:700;font-size:14px}
+.who-block{display:flex;flex-direction:column;line-height:1.25}
+.who-block strong{font-size:14px}
+.role-badge{margin-top:0;background:var(--brand);color:var(--brand-ink);letter-spacing:.04em}
+.inline-field{display:block;max-width:340px;margin-bottom:14px}
+.spinner{color:var(--muted);font-size:13px;padding:14px;text-align:center}
+.assign-row{display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-top:8px}
+.assign-row select{max-width:240px;margin-top:0}
 .who{color:var(--muted);font-size:13px}
 main{max-width:1060px;margin:0 auto;padding:22px}
 h1{font-size:26px;margin:0 0 6px}

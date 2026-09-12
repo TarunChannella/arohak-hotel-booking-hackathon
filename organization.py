@@ -154,15 +154,22 @@ class OrganizationStore:
         assigned to them, and an anonymous customer sees active hotels in the
         organization they are browsing.
         """
+        # Customers browse the platform, so they are scoped by the organization
+        # they picked, not by the one their account happens to belong to.
+        browsing = not user or user["role"] == "CUSTOMER"
         query = "SELECT * FROM hotels WHERE 1=1"
         params = []
-        if user and not is_product_admin(user):
+        if browsing:
+            if organization_id:
+                query += " AND organization_id=?"
+                params.append(organization_id)
+        elif not is_product_admin(user):
             query += " AND organization_id=?"
             params.append(user["organization_id"])
         elif organization_id:
             query += " AND organization_id=?"
             params.append(organization_id)
-        if not user or user["role"] == "CUSTOMER":
+        if browsing:
             query += " AND status='ACTIVE'"
         query += " ORDER BY name"
         with db.connect(self.path) as conn:

@@ -16,6 +16,25 @@ let me = null;
 let hotel = null;
 let lastSearch = null;
 let customerFilter = 'all';
+// Selected organization and hotel persist across reloads for the customer flow.
+let selection = { organization_id: null, hotel_id: null, hotel_name: '' };
+
+function loadSelection() {
+  try {
+    const saved = JSON.parse(localStorage.getItem('meridian.selection') || '{}');
+    if (saved && typeof saved === 'object') Object.assign(selection, saved);
+  } catch (err) { /* a fresh selection is fine */ }
+}
+
+function saveSelection() {
+  try { localStorage.setItem('meridian.selection', JSON.stringify(selection)); }
+  catch (err) { /* private browsing: selection just will not persist */ }
+}
+
+function busy(box, text) {
+  box.textContent = '';
+  box.append(el('p', 'spinner', text || 'Loading…'));
+}
 
 async function api(url, options = {}) {
   const res = await fetch(url, {
@@ -37,15 +56,30 @@ function toast(text, isError) {
 
 /* ---------------- tabs, driven by role ---------------- */
 
+const ROLE_LABELS = {
+  PRODUCT_ADMIN: 'PRODUCT ADMIN',
+  ORGANIZATION_ADMIN: 'ORGANIZATION ADMIN',
+  ADMIN: 'HOTEL ADMIN',
+  RECEPTIONIST: 'RECEPTIONIST',
+  CUSTOMER: 'CUSTOMER',
+};
+
+// Navigation is generated per role. A tab a role may not use is never rendered,
+// and the server authorizes every request regardless of what the UI shows.
 const TABS = {
-  CUSTOMER: [['search', 'Find a room'], ['mybookings', 'My bookings'],
-             ['assistant', 'Booking assistant'], ['chat', 'Hotel info']],
-  RECEPTIONIST: [['staff-bookings', 'Bookings'], ['cancellations', 'Cancellations'],
-                 ['manage-rooms', 'Rooms'], ['search', 'Availability'], ['chat', 'Hotel info']],
-  ADMIN: [['staff-bookings', 'Bookings'], ['cancellations', 'Cancellations'],
-          ['manage-rooms', 'Rooms'], ['manage-hotel', 'Hotel'],
-          ['manage-document', 'Hotel PDF'], ['search', 'Availability'],
-          ['chat', 'Hotel info']],
+  CUSTOMER: [['search', 'Find Room'], ['mybookings', 'My Bookings'],
+             ['assistant', 'Booking Assistant'], ['chat', 'Hotel Information']],
+  RECEPTIONIST: [['staff-bookings', 'Bookings'], ['cancellations', 'Cancellation Requests'],
+                 ['manage-rooms', 'Rooms'], ['search', 'Availability']],
+  ADMIN: [['staff-bookings', 'Bookings'], ['cancellations', 'Cancellation Requests'],
+          ['manage-rooms', 'Rooms'], ['search', 'Availability'],
+          ['manage-hotel', 'Hotel'], ['manage-document', 'Hotel PDF']],
+  ORGANIZATION_ADMIN: [['organizations', 'Organization'], ['manage-hotels', 'Hotels'],
+                       ['manage-rooms', 'Rooms'], ['assignments', 'Receptionist Assignments'],
+                       ['staff-bookings', 'Bookings'], ['cancellations', 'Cancellation Requests'],
+                       ['manage-document', 'Hotel PDF']],
+  PRODUCT_ADMIN: [['organizations', 'Organizations'], ['manage-hotels', 'Hotels'],
+                  ['assignments', 'Receptionist Assignments'], ['staff-bookings', 'Bookings']],
 };
 
 function showTab(id) {
@@ -57,7 +91,11 @@ function showTab(id) {
   if (id === 'cancellations') loadCancellations();
   if (id === 'manage-rooms') loadRoomsAdmin();
   if (id === 'manage-hotel') fillHotelForm();
-  if (id === 'manage-document') loadDocument();
+  if (id === 'manage-document') loadDocumentPanel();
+  if (id === 'organizations') loadOrganizations();
+  if (id === 'manage-hotels') loadManagedHotels();
+  if (id === 'assignments') loadAssignments();
+  if (id === 'chat') updateChatHotelBadge();
 }
 
 function buildTabs() {
@@ -70,11 +108,28 @@ function buildTabs() {
     nav.append(b);
   });
   // Only admins may create rooms; receptionists edit existing ones.
-  $('#room-form').classList.toggle('hidden', me.role !== 'ADMIN');
+  const canCreateRooms = ['ADMIN', 'ORGANIZATION_ADMIN', 'PRODUCT_ADMIN'].includes(me.role);
+  $('#room-form').classList.toggle('hidden', !canCreateRooms);
+  // Only a product admin may create organizations.
+  $('#org-form').classList.toggle('hidden', me.role !== 'PRODUCT_ADMIN');
+  $('#new-hotel-form').classList.toggle('hidden',
+    !['ORGANIZATION_ADMIN', 'PRODUCT_ADMIN'].includes(me.role));
   showTab((TABS[me.role] || TABS.CUSTOMER)[0][0]);
 }
 
 /* ---------------- session ---------------- */
+
+function renderHeader() {
+  if (!me) return;
+  $('#avatar').textContent = (me.name || '?').trim().charAt(0).toUpperCase();
+  $('#who-name').textContent = me.name;
+  $('#role-badge').textContent = ROLE_LABELS[me.role] || me.role;
+  const parts = [];
+  if (selection.organization_name) parts.push(selection.organization_name);
+  else if (me.organization_id) parts.push(me.organization_id);
+  if (selection.hotel_name) parts.push(selection.hotel_name);
+  $('#who-context').textContent = parts.join(' · ');
+}
 
 async function refreshSession() {
   const data = await api('/api/auth/me');
@@ -82,10 +137,10 @@ async function refreshSession() {
   const signedIn = Boolean(me);
   $('#gate').classList.toggle('active', !signedIn);
   $('#app').classList.toggle('hidden', !signedIn);
-  $('#who').classList.toggle('hidden', !signedIn);
-  $('#logout').classList.toggle('hidden', !signedIn);
+  $('#account').classList.toggle('hidden', !signedIn);
   if (signedIn) {
-    $('#who').textContent = me.name + ' · ' + me.role;
+    await loadOrganizationChoices();
+    renderHeader();
     buildTabs();
   }
 }
@@ -125,19 +180,77 @@ $('#register-form').onsubmit = async e => {
 
 /* ---------------- hotel ---------------- */
 
-async function loadHotels() {
-  // Customer flow: organization -> hotel -> rooms. One hotel still shows, so
-  // the selector is simply a list of one.
+/* Customer flow: organization -> hotel -> rooms -> availability -> booking. */
+
+function fillSelect(select, rows, label, chosen) {
+  select.textContent = '';
+  rows.forEach(row => {
+    const option = el('option', null, label(row));
+    option.value = row.id;
+    select.append(option);
+  });
+  if (chosen && rows.some(r => r.id === chosen)) select.value = chosen;
+  return select.value;
+}
+
+async function loadOrganizationChoices() {
   try {
-    const data = await api('/api/hotels');
-    const select = $('#hotel-select');
-    select.textContent = '';
-    data.hotels.forEach(h => {
-      const option = el('option', null, h.name + ' — ' + h.city);
-      option.value = h.id;
-      select.append(option);
-    });
+    const data = await api('/api/organizations');
+    const rows = data.organizations || [];
+    if (!rows.length) return;
+    selection.organization_id = fillSelect(
+      $('#org-select'), rows, o => o.name, selection.organization_id);
+    const current = rows.find(o => o.id === selection.organization_id);
+    selection.organization_name = current ? current.name : '';
+    await loadHotelChoices();
   } catch (err) { /* the default hotel still works */ }
+}
+
+async function loadHotelChoices() {
+  try {
+    const query = selection.organization_id
+      ? '?organization_id=' + encodeURIComponent(selection.organization_id) : '';
+    const data = await api('/api/hotels' + query);
+    const rows = data.hotels || [];
+    const select = $('#hotel-select');
+    if (!rows.length) {
+      select.textContent = '';
+      select.append(el('option', null, 'No hotels available'));
+      selection.hotel_id = null;
+      selection.hotel_name = '';
+    } else {
+      selection.hotel_id = fillSelect(
+        select, rows, h => h.name + ' — ' + h.city, selection.hotel_id);
+      const current = rows.find(h => h.id === selection.hotel_id);
+      selection.hotel_name = current ? current.name : '';
+    }
+    saveSelection();
+    renderHeader();
+    updateChatHotelBadge();
+  } catch (err) { /* leave the previous selection in place */ }
+}
+
+$('#org-select').onchange = async () => {
+  selection.organization_id = $('#org-select').value;
+  const chosen = $('#org-select').selectedOptions[0];
+  selection.organization_name = chosen ? chosen.textContent : '';
+  selection.hotel_id = null;                 // force a fresh hotel choice
+  await loadHotelChoices();
+  $('#rooms').textContent = '';
+};
+
+$('#hotel-select').onchange = () => {
+  selection.hotel_id = $('#hotel-select').value;
+  const chosen = $('#hotel-select').selectedOptions[0];
+  selection.hotel_name = chosen ? chosen.textContent.split(' — ')[0] : '';
+  saveSelection();
+  renderHeader();
+  updateChatHotelBadge();
+  $('#rooms').textContent = '';
+};
+
+function updateChatHotelBadge() {
+  $('#chat-hotel').textContent = selection.hotel_name || 'Default hotel';
 }
 
 async function loadHotel() {
@@ -200,9 +313,10 @@ $('#search-form').onsubmit = async e => {
   e.preventDefault();
   lastSearch = { check_in: $('#check-in').value, check_out: $('#check-out').value,
                  guests: +$('#guests').value };
-  if ($('#hotel-select').value) lastSearch.hotel_id = $('#hotel-select').value;
+  // Never silently fall back to the default hotel when one has been chosen.
+  if (selection.hotel_id) lastSearch.hotel_id = selection.hotel_id;
   const box = $('#rooms');
-  box.textContent = '';
+  busy(box, 'Checking availability…');
   try {
     const data = await api('/api/availability?' + new URLSearchParams(lastSearch));
     if (!data.rooms.length) { box.append(el('p', 'notice', 'No rooms available for those dates and guest count.')); return; }
@@ -341,9 +455,13 @@ async function loadCancellations() {
 
 async function loadRoomsAdmin() {
   const box = $('#rooms-admin');
-  box.textContent = '';
+  busy(box, 'Loading rooms…');
   try {
-    const data = await api('/api/rooms');
+    const path = selection.hotel_id
+      ? '/api/hotels/' + encodeURIComponent(selection.hotel_id) + '/rooms' : '/api/rooms';
+    const data = await api(path);
+    if (!data.rooms.length) { box.textContent = ''; box.append(el('p', 'notice', 'No rooms yet.')); return; }
+    box.textContent = '';
     data.rooms.forEach(room => {
       const card = el('article', 'card');
       const body = el('div');
@@ -394,21 +512,200 @@ $('#room-form').onsubmit = async e => {
     await api('/api/rooms', { method: 'POST', body: JSON.stringify({
       room_number: $('#rm-number').value, room_type: $('#rm-type').value,
       capacity: $('#rm-capacity').value, price_per_night: $('#rm-price').value,
-      description: $('#rm-desc').value, amenities: $('#rm-amenities').value }) });
+      description: $('#rm-desc').value, amenities: $('#rm-amenities').value,
+      hotel_id: selection.hotel_id || undefined }) });
     e.target.reset();
     toast('Room added.');
     loadRoomsAdmin();
   } catch (err) { toast(err.message, true); }
 };
 
+/* ---------------- organizations, hotels, assignments ---------------- */
+
+async function loadOrganizations() {
+  const box = $('#org-list');
+  busy(box, 'Loading organizations…');
+  try {
+    const data = await api('/api/organizations');
+    const rows = data.organizations || [];
+    box.textContent = '';
+    if (!rows.length) { box.append(el('p', 'notice', 'No organizations yet.')); return; }
+    for (const org of rows) {
+      const card = el('article', 'card');
+      const body = el('div');
+      body.append(el('h3', null, org.name));
+      body.append(el('p', 'mono', org.id));
+      if (org.status) body.append(el('span', 'badge status-' + org.status, org.status));
+      card.append(body);
+      if (me.role === 'PRODUCT_ADMIN' && org.status) {
+        const actions = el('div', 'actions');
+        const active = org.status === 'ACTIVE';
+        const toggle = el('button', null, active ? 'Deactivate' : 'Activate');
+        toggle.onclick = () => setOrgStatus(org.id, active ? 'INACTIVE' : 'ACTIVE');
+        const view = el('button', null, 'View hotels');
+        view.onclick = () => { selection.organization_id = org.id; saveSelection();
+                               showTab('manage-hotels'); };
+        actions.append(toggle, view);
+        card.append(actions);
+      }
+      box.append(card);
+    }
+  } catch (err) { box.textContent = ''; box.append(el('p', 'notice', err.message)); }
+}
+
+async function setOrgStatus(id, status) {
+  try {
+    await api('/api/organizations/' + id, { method: 'PUT', body: JSON.stringify({ status }) });
+    toast('Organization ' + (status === 'ACTIVE' ? 'activated.' : 'deactivated.'));
+    loadOrganizations();
+  } catch (err) { toast(err.message, true); }
+}
+
+$('#org-form').onsubmit = async e => {
+  e.preventDefault();
+  try {
+    await api('/api/organizations', { method: 'POST',
+      body: JSON.stringify({ name: $('#org-name').value }) });
+    e.target.reset();
+    toast('Organization created.');
+    loadOrganizations();
+    loadOrganizationChoices();
+  } catch (err) { toast(err.message, true); }
+};
+
+async function loadManagedHotels() {
+  const box = $('#hotel-list');
+  busy(box, 'Loading hotels…');
+  try {
+    const query = (me.role === 'PRODUCT_ADMIN' && selection.organization_id)
+      ? '?organization_id=' + encodeURIComponent(selection.organization_id) : '';
+    const data = await api('/api/hotels' + query);
+    const rows = data.hotels || [];
+    box.textContent = '';
+    if (!rows.length) { box.append(el('p', 'notice', 'No hotels in this organization yet.')); return; }
+    rows.forEach(h => {
+      const card = el('article', 'card');
+      const body = el('div');
+      body.append(el('h3', null, h.name));
+      body.append(el('p', 'muted', h.address + ', ' + h.city));
+      body.append(el('p', 'mono', h.id + ' · ' + h.organization_id));
+      body.append(el('span', 'badge status-' + h.status, h.status));
+      card.append(body);
+      const actions = el('div', 'actions');
+      const manage = el('button', null, 'Manage rooms');
+      manage.onclick = () => {
+        selection.hotel_id = h.id; selection.hotel_name = h.name;
+        saveSelection(); renderHeader(); showTab('manage-rooms');
+      };
+      actions.append(manage);
+      card.append(actions);
+      box.append(card);
+    });
+  } catch (err) { box.textContent = ''; box.append(el('p', 'notice', err.message)); }
+}
+
+$('#new-hotel-form').onsubmit = async e => {
+  e.preventDefault();
+  try {
+    await api('/api/hotels', { method: 'POST', body: JSON.stringify({
+      name: $('#nh-name').value, city: $('#nh-city').value, address: $('#nh-address').value,
+      contact_number: $('#nh-phone').value, email: $('#nh-email').value,
+      organization_id: me.role === 'PRODUCT_ADMIN' ? selection.organization_id : undefined }) });
+    e.target.reset();
+    toast('Hotel added.');
+    loadManagedHotels();
+    loadOrganizationChoices();
+  } catch (err) { toast(err.message, true); }
+};
+
+async function loadAssignments() {
+  const box = $('#assignment-list');
+  busy(box, 'Loading receptionists…');
+  try {
+    const [people, hotelData] = await Promise.all([
+      api('/api/users?role=RECEPTIONIST'),
+      api('/api/hotels'),
+    ]);
+    const rows = people.users || [];
+    const allHotels = hotelData.hotels || [];
+    box.textContent = '';
+    if (!rows.length) { box.append(el('p', 'notice', 'No receptionists in this organization.')); return; }
+    rows.forEach(person => {
+      const card = el('article', 'card');
+      const body = el('div');
+      body.append(el('h3', null, person.name));
+      body.append(el('p', 'muted', person.email));
+      const assigned = person.hotel_ids || [];
+      if (!assigned.length) {
+        body.append(el('p', 'muted', 'No hotels assigned — this receptionist sees nothing.'));
+      } else {
+        assigned.forEach(id => {
+          const match = allHotels.find(h => h.id === id);
+          const chip = el('span', 'badge status-ACTIVE', match ? match.name : id);
+          const remove = el('button', null, 'Unassign');
+          remove.onclick = () => changeAssignment('/api/assignments/remove', person.id, id);
+          body.append(chip, remove);
+        });
+      }
+      const row = el('div', 'assign-row');
+      const picker = el('select');
+      allHotels.filter(h => !assigned.includes(h.id)).forEach(h => {
+        const option = el('option', null, h.name);
+        option.value = h.id;
+        picker.append(option);
+      });
+      const add = el('button', 'primary', 'Assign');
+      add.onclick = () => {
+        if (!picker.value) { toast('No hotel left to assign.', true); return; }
+        changeAssignment('/api/assignments', person.id, picker.value);
+      };
+      row.append(picker, add);
+      body.append(row);
+      card.append(body);
+      box.append(card);
+    });
+  } catch (err) { box.textContent = ''; box.append(el('p', 'notice', err.message)); }
+}
+
+async function changeAssignment(path, userId, hotelId) {
+  try {
+    await api(path, { method: 'POST', body: JSON.stringify({ user_id: userId, hotel_id: hotelId }) });
+    toast('Assignment updated.');
+    loadAssignments();
+  } catch (err) { toast(err.message, true); }
+}
+
 /* ---------------- hotel PDF (admin) ---------------- */
+
+async function loadDocumentPanel() {
+  // The admin picks which managed hotel's PDF to inspect or replace.
+  try {
+    const data = await api('/api/hotels');
+    const rows = data.hotels || [];
+    if (rows.length) {
+      fillSelect($('#doc-hotel'), rows, h => h.name, selection.hotel_id || rows[0].id);
+    }
+  } catch (err) { /* fall back to the default hotel */ }
+  loadDocument();
+}
+
+$('#doc-hotel').onchange = () => loadDocument();
 
 async function loadDocument() {
   const box = $('#doc-info');
-  box.textContent = '';
+  busy(box, 'Loading document…');
+  const target = $('#doc-hotel').value || selection.hotel_id;
   try {
-    const doc = (await api('/api/hotel/document')).document;
-    if (!doc) { box.append(el('p', 'notice', 'No document indexed yet.')); return; }
+    const query = target ? '?hotel_id=' + encodeURIComponent(target) : '';
+    const payload = await api('/api/hotel/document' + query);
+    const doc = payload.document;
+    box.textContent = '';
+    if (!doc) {
+      box.append(el('p', 'notice',
+        'No document uploaded for ' + (payload.hotel ? payload.hotel.name : 'this hotel') +
+        '. The chatbot cannot answer questions about it until one is added.'));
+      return;
+    }
     const card = el('article', 'card');
     const body = el('div');
     body.append(el('h3', null, doc.original_name));
@@ -427,10 +724,11 @@ $('#doc-form').onsubmit = async e => {
   if (!file) return;
   try {
     // Raw PDF body keeps the server free of a multipart parser.
+    const headers = { 'Content-Type': 'application/pdf', 'X-Filename': file.name };
+    const target = $('#doc-hotel').value || selection.hotel_id;
+    if (target) headers['X-Hotel-Id'] = target;
     const res = await fetch('/api/hotel/document', {
-      method: 'POST', credentials: 'same-origin',
-      headers: { 'Content-Type': 'application/pdf', 'X-Filename': file.name },
-      body: file,
+      method: 'POST', credentials: 'same-origin', headers, body: file,
     });
     const data = await res.json().catch(() => ({}));
     if (!res.ok) throw new Error(data.error || 'Upload failed');
@@ -448,7 +746,8 @@ function message(text, type, citations) {
   const body = el('div');
   body.append(el('p', null, text));
   (citations || []).forEach(c => body.append(el('span', 'citation',
-    'Source: ' + c.section + (c.page ? ' (page ' + c.page + ')' : ''))));
+    'Source: ' + (c.hotel ? c.hotel + ' · ' : '') + c.section +
+    (c.page ? ' (page ' + c.page + ')' : ''))));
   art.append(body);
   $('#messages').append(art);
   $('#messages').scrollTop = $('#messages').scrollHeight;
@@ -461,7 +760,8 @@ $('#chat-form').onsubmit = async e => {
   message(q, 'user');
   $('#question').value = '';
   try {
-    const data = await api('/api/chat', { method: 'POST', body: JSON.stringify({ question: q }) });
+    const data = await api('/api/chat', { method: 'POST', body: JSON.stringify(
+      { question: q, hotel_id: selection.hotel_id || undefined }) });
     message(data.answer, 'assistant', data.citations);
   } catch (err) { message(err.message, 'assistant'); }
 };
@@ -493,7 +793,8 @@ $('#asst-form').onsubmit = async e => {
   assistantMessage(text, 'user');
   $('#asst-input').value = '';
   try {
-    const data = await api('/api/assistant', { method: 'POST', body: JSON.stringify({ message: text }) });
+    const data = await api('/api/assistant', { method: 'POST', body: JSON.stringify(
+      { message: text, hotel_id: selection.hotel_id || undefined }) });
     assistantMessage(data.reply, 'assistant', data.requires_confirmation);
     if (data.action === 'created' || data.action === 'cancelled') loadMyBookings();
   } catch (err) { assistantMessage(err.message, 'assistant'); }
@@ -525,4 +826,5 @@ function localISO(d) {
   };
 })();
 
-loadHotel().then(loadHotels).then(refreshSession).catch(() => {});
+loadSelection();
+loadHotel().then(refreshSession).catch(() => {});

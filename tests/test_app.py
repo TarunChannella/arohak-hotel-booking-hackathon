@@ -1370,5 +1370,231 @@ class DemoSeedTests(TempDbTest):
         self.assertTrue(hasattr(server, "seed_demo_accounts"))
 
 
+# --------------------------------------------------------------------------
+# Selected-hotel PDF retrieval
+# --------------------------------------------------------------------------
+
+class SelectedHotelRagTests(TempDbTest):
+    """Each hotel answers from its own PDF and never from another hotel's."""
+
+    def setUp(self):
+        super().setUp()
+        self.orgs = OrganizationStore(self.db)
+        self.product_admin = self.auth.register(
+            {"name": "Platform", "email": "platform@example.com",
+             "password": "password123", "role": "PRODUCT_ADMIN"}, allow_staff=True)
+        self.org_b = self.orgs.create(self.product_admin, {"name": "Coastal Stays"})["id"]
+        self.admin_b = self.auth.register(
+            {"name": "Admin B", "email": "admin.b@example.com",
+             "password": "password123", "role": "ORGANIZATION_ADMIN"},
+            allow_staff=True, organization_id=self.org_b)
+        self.hotel_a = db.DEFAULT_HOTEL_ID
+        self.hotel_b = self.orgs.create_hotel(self.admin_b, {
+            "name": "Coastal Retreat", "city": "Goa", "address": "9 Beach Road"})["id"]
+
+    def give_b_a_pdf(self, lines=None):
+        ingest.ingest_pdf_bytes(self.hotel_b, build_minimal_pdf(lines or [
+            "Coastal Retreat", "1. Pool Policy",
+            "The rooftop pool is open from 7:00 AM to 8:00 PM.",
+            "2. Pet Policy", "Dogs under 10 kg are welcome."]), "coastal.pdf")
+
+    def test_a_new_hotel_does_not_inherit_the_seeded_pdf(self):
+        """A hotel with no document must not answer from another hotel's PDF."""
+        self.assertFalse(ingest.has_document(self.hotel_b))
+        with self.assertRaises(ingest.MissingDocument):
+            ingest.load_index(self.hotel_b)
+
+    def test_hotel_a_never_answers_from_hotel_b_pdf(self):
+        self.give_b_a_pdf()
+        rag_a = HotelRetriever(self.hotel_a)
+        rag_b = HotelRetriever(self.hotel_b)
+        text_a = " ".join(c["text"] for c in rag_a.sections)
+        text_b = " ".join(c["text"] for c in rag_b.sections)
+        self.assertIn("MeridianGuest", text_a)
+        self.assertNotIn("MeridianGuest", text_b)
+        self.assertIn("rooftop pool", text_b.lower())
+        self.assertNotIn("rooftop pool", text_a.lower())
+        # A question only Hotel B's document answers is refused by Hotel A.
+        self.assertFalse(rag_a.answer("Are dogs welcome?")["grounded"])
+        self.assertTrue(rag_b.answer("Are dogs welcome?")["grounded"])
+        # And the reverse.
+        self.assertFalse(rag_b.answer("What is the guest Wi-Fi network name?")["grounded"])
+        self.assertTrue(rag_a.answer("What is the guest Wi-Fi network name?")["grounded"])
+
+    def test_replacing_hotel_a_pdf_leaves_hotel_b_unchanged(self):
+        self.give_b_a_pdf()
+        before = ingest.file_digest(ingest.stored_pdf_path(self.hotel_b))
+        before_chunks = HotelRetriever(self.hotel_b).sections
+        ingest.ingest_pdf_bytes(self.hotel_a, build_minimal_pdf([
+            "Meridian Rules", "1. Smoking Policy", "Smoking is not permitted indoors."]),
+            "meridian-v2.pdf")
+        self.assertEqual(ingest.file_digest(ingest.stored_pdf_path(self.hotel_b)), before)
+        after_chunks = HotelRetriever(self.hotel_b).sections
+        self.assertEqual([c["text"] for c in before_chunks], [c["text"] for c in after_chunks])
+        self.assertIn("rooftop pool", " ".join(c["text"] for c in after_chunks).lower())
+        # Hotel A now reflects its replacement.
+        self.assertIn("Smoking", " ".join(c["text"] for c in HotelRetriever(self.hotel_a).sections))
+
+    def test_document_records_are_kept_per_hotel(self):
+        self.give_b_a_pdf()
+        info_a = ingest.document_info(self.hotel_a) or {}
+        info_b = ingest.document_info(self.hotel_b)
+        self.assertEqual(info_b["hotel_id"], self.hotel_b)
+        self.assertEqual(info_b["original_name"], "coastal.pdf")
+        if info_a:
+            self.assertNotEqual(info_a["sha256"], info_b["sha256"])
+
+    def test_citations_report_section_and_page_for_the_selected_hotel(self):
+        self.give_b_a_pdf()
+        result = HotelRetriever(self.hotel_b).answer("When is the pool open?")
+        self.assertTrue(result["grounded"])
+        citation = result["citations"][0]
+        self.assertIn("Pool", citation["section"])
+        self.assertEqual(citation["page"], 1)
+        self.assertTrue(citation["excerpt"])
+
+    def test_missing_pdf_is_reported_not_guessed(self):
+        """A hotel without a document must say so rather than invent an answer."""
+        with self.assertRaises(ingest.MissingDocument):
+            HotelRetriever(self.hotel_b)
+
+    def test_pdf_swap_does_not_change_availability(self):
+        self.hotels.create_room({"room_number": "B1", "room_type": "Sea View",
+                                 "capacity": 2, "price_per_night": 9000},
+                                hotel_id=self.hotel_b)
+        check_in, check_out = self.dates()
+        before = len(self.bookings.search(check_in, check_out, 2, hotel_id=self.hotel_b))
+        self.give_b_a_pdf(["Coastal Retreat", "1. Room Categories",
+                           "Presidential Villa 8 guests INR 90,000"])
+        after = len(self.bookings.search(check_in, check_out, 2, hotel_id=self.hotel_b))
+        self.assertEqual(before, after)
+        # The PDF claims a villa exists; live inventory still has only room B1.
+        rooms = [r["room_number"] for r in self.bookings.search(check_in, check_out, 2,
+                                                                hotel_id=self.hotel_b)]
+        self.assertEqual(rooms, ["B1"])
+
+
+class SelectedHotelAuthorizationTests(SelectedHotelRagTests):
+    def test_staff_cannot_reach_another_organizations_hotel_document(self):
+        self.give_b_a_pdf()
+        admin_a = self.auth.register(
+            {"name": "Admin A", "email": "admin.a@example.com",
+             "password": "password123", "role": "ORGANIZATION_ADMIN"}, allow_staff=True)
+        with self.assertRaises(PermissionError_):
+            self.orgs.require_hotel_access(admin_a, self.hotel_b)
+        self.orgs.require_hotel_access(self.admin_b, self.hotel_b)
+
+    def test_receptionist_is_limited_to_assigned_hotels_for_documents(self):
+        self.give_b_a_pdf()
+        receptionist = self.auth.register(
+            {"name": "Desk B", "email": "desk.b@example.com",
+             "password": "password123", "role": "RECEPTIONIST"},
+            allow_staff=True, organization_id=self.org_b)
+        with self.assertRaises(PermissionError_):
+            self.orgs.require_hotel_access(receptionist, self.hotel_b)
+        self.orgs.assign_receptionist(self.admin_b, receptionist["id"], self.hotel_b)
+        self.orgs.require_hotel_access(receptionist, self.hotel_b)
+
+    def test_inactive_hotel_is_not_offered_to_customers(self):
+        self.hotels.update_hotel({"status": "INACTIVE"}, hotel_id=self.hotel_b)
+        customer = self.customer()
+        visible = [h["id"] for h in self.orgs.list_hotels(customer, organization_id=self.org_b)]
+        self.assertNotIn(self.hotel_b, visible)
+
+
+class AssistantHotelScopeTests(TempDbTest):
+    def setUp(self):
+        super().setUp()
+        self.orgs = OrganizationStore(self.db)
+        product_admin = self.auth.register(
+            {"name": "P", "email": "p@example.com", "password": "password123",
+             "role": "PRODUCT_ADMIN"}, allow_staff=True)
+        org_b = self.orgs.create(product_admin, {"name": "Coastal"})["id"]
+        admin_b = self.auth.register(
+            {"name": "A", "email": "a@example.com", "password": "password123",
+             "role": "ORGANIZATION_ADMIN"}, allow_staff=True, organization_id=org_b)
+        self.hotel_b = self.orgs.create_hotel(admin_b, {
+            "name": "Coastal Retreat", "city": "Goa", "address": "9 Beach Road"})["id"]
+        self.hotels.create_room({"room_number": "B1", "room_type": "Sea View",
+                                 "capacity": 2, "price_per_night": 9000},
+                                hotel_id=self.hotel_b)
+        self.assistant = BookingAssistant(ToolLayer(self.bookings, self.hotels))
+        self.user = self.customer()
+
+    def test_assistant_searches_the_selected_hotel(self):
+        check_in, check_out = self.dates()
+        reply = self.assistant.respond(
+            self.user, f"I need a room for 2 people from {check_in} to {check_out}",
+            hotel_id=self.hotel_b)
+        self.assertTrue(reply["requires_confirmation"])
+        self.assertIn("Coastal Retreat", reply["reply"])
+        self.assertIn("B1", reply["reply"])
+
+    def test_assistant_books_into_the_selected_hotel(self):
+        check_in, check_out = self.dates()
+        self.assistant.respond(
+            self.user, f"I need a room for 2 people from {check_in} to {check_out}",
+            hotel_id=self.hotel_b)
+        booking = self.assistant.respond(self.user, "yes", hotel_id=self.hotel_b)["data"]["booking"]
+        self.assertEqual(booking["hotel_id"], self.hotel_b)
+        self.assertEqual(booking["room_number"], "B1")
+
+    def test_default_hotel_is_used_when_none_is_selected(self):
+        check_in, check_out = self.dates()
+        reply = self.assistant.respond(
+            self.user, f"I need a room for 2 people from {check_in} to {check_out}")
+        self.assertIn("Meridian", reply["reply"])
+
+
+class CustomerBrowsingScopeTests(TempDbTest):
+    """Customers browse the whole platform, not just their own organization."""
+
+    def setUp(self):
+        super().setUp()
+        self.orgs = OrganizationStore(self.db)
+        product_admin = self.auth.register(
+            {"name": "P", "email": "p@example.com", "password": "password123",
+             "role": "PRODUCT_ADMIN"}, allow_staff=True)
+        self.org_b = self.orgs.create(product_admin, {"name": "Coastal"})["id"]
+        admin_b = self.auth.register(
+            {"name": "A", "email": "a@example.com", "password": "password123",
+             "role": "ORGANIZATION_ADMIN"}, allow_staff=True, organization_id=self.org_b)
+        self.hotel_b = self.orgs.create_hotel(admin_b, {
+            "name": "Coastal Retreat", "city": "Goa", "address": "9 Beach Road"})["id"]
+        self.customer = self.customer()
+
+    def test_customer_sees_hotels_of_the_organization_they_pick(self):
+        # The customer account belongs to the default organization, but picking
+        # organization B must list organization B's hotels.
+        listed = [h["id"] for h in self.orgs.list_hotels(
+            self.customer, organization_id=self.org_b)]
+        self.assertEqual(listed, [self.hotel_b])
+
+    def test_customer_sees_default_organization_hotels_when_picking_it(self):
+        listed = [h["id"] for h in self.orgs.list_hotels(
+            self.customer, organization_id=db.DEFAULT_ORG_ID)]
+        self.assertIn(db.DEFAULT_HOTEL_ID, listed)
+        self.assertNotIn(self.hotel_b, listed)
+
+    def test_customer_browsing_hides_inactive_hotels(self):
+        self.hotels.update_hotel({"status": "INACTIVE"}, hotel_id=self.hotel_b)
+        listed = [h["id"] for h in self.orgs.list_hotels(
+            self.customer, organization_id=self.org_b)]
+        self.assertEqual(listed, [])
+
+    def test_every_active_organization_is_browsable(self):
+        ids = {o["id"] for o in self.orgs.list_public()}
+        self.assertIn(db.DEFAULT_ORG_ID, ids)
+        self.assertIn(self.org_b, ids)
+
+    def test_staff_listing_is_still_restricted_to_their_own_organization(self):
+        admin_a = self.auth.register(
+            {"name": "AA", "email": "aa@example.com", "password": "password123",
+             "role": "ORGANIZATION_ADMIN"}, allow_staff=True)
+        listed = [h["id"] for h in self.orgs.list_hotels(
+            admin_a, organization_id=self.org_b)]
+        self.assertEqual(listed, [db.DEFAULT_HOTEL_ID])
+
+
 if __name__ == "__main__":
     unittest.main()

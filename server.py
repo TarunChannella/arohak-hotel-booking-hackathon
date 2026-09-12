@@ -35,12 +35,44 @@ hotels = HotelStore()
 bookings = BookingStore()
 organizations = OrganizationStore()
 retriever = HotelRetriever()
+# One retriever per hotel, built on first use. Each reads only its own PDF.
+_retrievers = {retriever.hotel_id: retriever}
+
+
+def get_retriever(hotel_id):
+    """Return the retriever for one hotel, building it on first use."""
+    if hotel_id not in _retrievers:
+        _retrievers[hotel_id] = HotelRetriever(hotel_id)
+    return _retrievers[hotel_id]
+
+
+def drop_retriever(hotel_id):
+    _retrievers.pop(hotel_id, None)
 # The assistant reaches application data only through this tool layer.
 assistant = BookingAssistant(ToolLayer(bookings, hotels))
 
 ORG_ID_RE = re.compile(r"^/api/organizations/([A-Za-z0-9\-]+)$")
 HOTEL_ID_RE = re.compile(r"^/api/hotels/([A-Za-z0-9\-]+)(/[a-z\-]+)?$")
 ROOM_ID_RE = re.compile(r"^/api/rooms/([A-Za-z0-9\-]+)(/[a-z\-]+)?$")
+
+
+def resolve_chat_hotel(user, hotel_id):
+    """Validate the hotel a chat or assistant request names.
+
+    Customers may use any active hotel; staff are held to their own scope. An
+    unknown, inactive or out-of-scope hotel is refused rather than quietly
+    falling back to the default.
+    """
+    if not hotel_id:
+        return hotels.get_hotel(db.DEFAULT_HOTEL_ID)
+    hotel = hotels.get_hotel(hotel_id)
+    if not hotel:
+        raise LookupError("Hotel not found.")
+    if auth.is_staff(user):
+        organizations.require_hotel_access(user, hotel_id)
+    elif hotel["status"] != "ACTIVE":
+        raise LookupError("Hotel not found.")
+    return hotel
 
 
 def scoped_hotel_ids(user):
@@ -108,7 +140,9 @@ class Handler(BaseHTTPRequestHandler):
 
             if route == "/api/organizations":
                 user = self.current_user()
-                if user:
+                # Staff see the organizations they administer; customers and
+                # visitors browse every active organization on the platform.
+                if user and auth.is_staff(user):
                     return self.send_json(200, {"organizations": organizations.list(user)})
                 return self.send_json(200, {"organizations": organizations.list_public()})
 
@@ -139,7 +173,10 @@ class Handler(BaseHTTPRequestHandler):
                 return self.send_json(200, {"hotel": hotels.get_hotel()})
 
             if route == "/api/hotel/document":
-                return self.send_json(200, {"document": ingest.document_info(db.DEFAULT_HOTEL_ID)})
+                user = self.current_user()
+                hotel = resolve_chat_hotel(user, query.get("hotel_id", [None])[0])
+                return self.send_json(200, {"document": ingest.document_info(hotel["id"]),
+                                            "hotel": {"id": hotel["id"], "name": hotel["name"]}})
 
             if route == "/api/rooms":
                 user = self.current_user()
@@ -172,8 +209,17 @@ class Handler(BaseHTTPRequestHandler):
                     hotel_ids=scoped_hotel_ids(user))})
 
             if route == "/api/users":
-                require_role(self.current_user(), "PRODUCT_ADMIN", "ORGANIZATION_ADMIN", "ADMIN")
-                return self.send_json(200, {"users": auth_store.list_users()})
+                user = require_role(self.current_user(), "PRODUCT_ADMIN", "ORGANIZATION_ADMIN", "ADMIN")
+                wanted = query.get("role", [None])[0]
+                people = auth_store.list_users()
+                if user["role"] != "PRODUCT_ADMIN":
+                    people = [p for p in people if p["organization_id"] == user["organization_id"]]
+                if wanted:
+                    people = [p for p in people if p["role"] == wanted]
+                for person in people:
+                    if person["role"] == "RECEPTIONIST":
+                        person["hotel_ids"] = organizations.assigned_hotel_ids(person["id"])
+                return self.send_json(200, {"users": people})
 
             match = BOOKING_ID_RE.match(route)
             if match and not match.group(2):
@@ -234,7 +280,12 @@ class Handler(BaseHTTPRequestHandler):
                 data = self.read_body(ingest.MAX_PDF_BYTES + 1024)
                 name = self.headers.get("X-Filename", "document.pdf")
                 record = ingest.ingest_pdf_bytes(hotel_id, data, name)
-                chunks = retriever.reload() if hotel_id == retriever.hotel_id else record["chunk_count"]
+                # Rebuild only this hotel's index; every other hotel is untouched.
+                if hotel_id in _retrievers:
+                    chunks = _retrievers[hotel_id].reload()
+                else:
+                    drop_retriever(hotel_id)
+                    chunks = record["chunk_count"]
                 return self.send_json(201, {"document": {
                     "hotel_id": record["hotel_id"], "original_name": record["original_name"],
                     "pages": record["pages"], "chunk_count": record["chunk_count"],
@@ -279,16 +330,34 @@ class Handler(BaseHTTPRequestHandler):
                     user, str(payload.get("user_id", "")), str(payload.get("hotel_id", "")))
                 return self.send_json(201, {"hotel_ids": assigned})
 
+            if route == "/api/assignments/remove":
+                user = require_user(self.current_user())
+                assigned = organizations.unassign_receptionist(
+                    user, str(payload.get("user_id", "")), str(payload.get("hotel_id", "")))
+                return self.send_json(200, {"hotel_ids": assigned})
+
             if route == "/api/assistant":
                 user = require_role(self.current_user(), "CUSTOMER")
                 message = str(payload.get("message", "")).strip()
-                return self.send_json(200, assistant.respond(user, message))
+                hotel = resolve_chat_hotel(user, payload.get("hotel_id"))
+                return self.send_json(200, assistant.respond(user, message, hotel_id=hotel["id"]))
 
             if route == "/api/chat":
                 question = str(payload.get("question", "")).strip()
                 if not question:
                     raise ValueError("Please enter a question.")
-                return self.send_json(200, retriever.answer(question))
+                hotel = resolve_chat_hotel(self.current_user(), payload.get("hotel_id"))
+                try:
+                    answer = get_retriever(hotel["id"]).answer(question)
+                except ingest.MissingDocument:
+                    return self.send_json(200, {
+                        "answer": f"No hotel information document has been uploaded for "
+                                  f"{hotel['name']} yet, so I cannot answer questions about it.",
+                        "grounded": False, "citations": [], "hotel": hotel["name"]})
+                answer["hotel"] = hotel["name"]
+                for citation in answer["citations"]:
+                    citation["hotel"] = hotel["name"]
+                return self.send_json(200, answer)
 
             if route == "/api/rooms":
                 user = require_role(self.current_user(), "PRODUCT_ADMIN", "ORGANIZATION_ADMIN", "ADMIN")

@@ -53,11 +53,11 @@ be self-registered — an administrator creates them via `POST /api/staff`.
 python -m unittest discover -s tests -v
 ```
 
-155 tests: authentication and roles, hotel and room management, availability,
+181 tests: authentication and roles, hotel and room management, availability,
 booking, concurrency, the cancellation lifecycle, dashboards, PDF ingestion and
 upload validation, the grounded chatbot, the controlled booking
-assistant, and multi-organization isolation. The ingestion tests run the actual
-supplied PDF through the real extraction path.
+assistant, multi-organization isolation and per-hotel PDF retrieval. The
+ingestion tests run the actual supplied PDF through the real extraction path.
 
 ## Roles
 
@@ -107,6 +107,8 @@ information, the room inventory, the hotel PDF, or anything in another hotel.
 | GET | `/api/hotels/{id}` · `/rooms` | scoped to the caller |
 | PUT | `/api/hotels/{id}` | admins, own organization only |
 | POST | `/api/assignments` | admins — assign a receptionist to a hotel |
+| POST | `/api/assignments/remove` | admins — unassign |
+| GET | `/api/users?role=` | admins — staff in their own organization |
 | GET | `/api/hotel` | public — the default hotel |
 | PUT | `/api/hotel` | ADMIN |
 | GET | `/api/rooms` | public (staff also see inactive rooms) |
@@ -120,10 +122,10 @@ information, the room inventory, the hotel PDF, or anything in another hotel.
 | POST | `/api/bookings/{id}/cancel` | owner or staff |
 | GET | `/api/cancellations` | ADMIN, RECEPTIONIST |
 | POST | `/api/bookings/{id}/approve-cancellation` · `/reject-cancellation` | ADMIN, RECEPTIONIST |
-| GET | `/api/hotel/document` | public — indexed PDF metadata |
+| GET | `/api/hotel/document?hotel_id=` | indexed PDF metadata for one hotel |
 | POST | `/api/hotel/document` | ADMIN — replace the hotel PDF and re-index |
-| POST | `/api/assistant` | CUSTOMER — natural-language booking assistant |
-| POST | `/api/chat` | public — grounded PDF chatbot |
+| POST | `/api/assistant` | CUSTOMER — booking assistant; takes `hotel_id` |
+| POST | `/api/chat` | public — grounded PDF chatbot; takes `hotel_id` |
 
 ## Architecture
 
@@ -211,6 +213,25 @@ confirmation for an action that was never proposed.
 
 **The UI never uses `innerHTML`.** All text is inserted with `textContent`, so
 guest-supplied values such as names cannot inject markup.
+
+## Customer flow
+
+Organization → Hotel → Rooms → Availability → Booking.
+
+The Find Room tab has an organization selector and a hotel selector. The chosen
+pair is kept in `localStorage`, so it survives a refresh, and is sent with every
+room search, booking, Booking Assistant turn and Hotel Information question.
+A selected hotel is never silently replaced by the default: an unknown,
+inactive or out-of-scope hotel is refused by the server.
+
+## Per-hotel PDF knowledge
+
+Each hotel has its own PDF, index and cache, keyed by hotel id. `/api/chat`
+takes a `hotel_id` and answers only from that hotel's document, citing the
+hotel name, section heading and page. A hotel with no PDF says so plainly
+rather than borrowing another hotel's. Only the seeded hotel receives the
+supplied document; a newly created hotel starts with no knowledge base until an
+admin uploads one. Replacing one hotel's PDF rebuilds that hotel's index alone.
 
 ## Cancellation rules
 

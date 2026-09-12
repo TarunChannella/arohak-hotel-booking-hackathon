@@ -37,6 +37,10 @@ class IngestionError(Exception):
     """Raised when a document cannot be accepted or produces no usable text."""
 
 
+class MissingDocument(IngestionError):
+    """Raised when a hotel has no information PDF at all."""
+
+
 # ---------------------------------------------------------------- validation
 
 def validate_pdf_bytes(data, original_name=""):
@@ -224,13 +228,27 @@ def ingest_pdf_bytes(hotel_id, data, original_name="document.pdf"):
     return record
 
 
+def has_document(hotel_id):
+    """True when this hotel has a PDF of its own on disk."""
+    return stored_pdf_path(hotel_id).exists()
+
+
 def ensure_seed_document(hotel_id=db.DEFAULT_HOTEL_ID):
-    """Put the supplied PDF in place for the seeded hotel on first run."""
+    """Put the supplied PDF in place for the seeded hotel on first run.
+
+    Only the seeded hotel gets the supplied document. Any other hotel must have
+    its own PDF uploaded, otherwise it has no knowledge base at all — copying
+    one hotel's document into another would let it answer with the wrong
+    hotel's policies.
+    """
     target = stored_pdf_path(hotel_id)
-    if not target.exists():
-        if not SUPPLIED_PDF.exists():
-            raise IngestionError(f"The supplied hotel PDF is missing: {SUPPLIED_PDF}")
-        shutil.copyfile(SUPPLIED_PDF, target)
+    if target.exists():
+        return target
+    if hotel_id != db.DEFAULT_HOTEL_ID:
+        raise MissingDocument(f"No hotel information PDF has been uploaded for {hotel_id}.")
+    if not SUPPLIED_PDF.exists():
+        raise IngestionError(f"The supplied hotel PDF is missing: {SUPPLIED_PDF}")
+    shutil.copyfile(SUPPLIED_PDF, target)
     return target
 
 
