@@ -38,7 +38,8 @@ function toast(text, isError) {
 /* ---------------- tabs, driven by role ---------------- */
 
 const TABS = {
-  CUSTOMER: [['search', 'Find a room'], ['mybookings', 'My bookings'], ['chat', 'Hotel info']],
+  CUSTOMER: [['search', 'Find a room'], ['mybookings', 'My bookings'],
+             ['assistant', 'Booking assistant'], ['chat', 'Hotel info']],
   RECEPTIONIST: [['staff-bookings', 'Bookings'], ['cancellations', 'Cancellations'],
                  ['manage-rooms', 'Rooms'], ['search', 'Availability'], ['chat', 'Hotel info']],
   ADMIN: [['staff-bookings', 'Bookings'], ['cancellations', 'Cancellations'],
@@ -406,9 +407,42 @@ $('#chat-form').onsubmit = async e => {
   } catch (err) { message(err.message, 'assistant'); }
 };
 
-$$('.suggestions button').forEach(b => b.onclick = () => {
+$$('#chat .suggestions button').forEach(b => b.onclick = () => {
   $('#question').value = b.textContent;
   $('#chat-form').requestSubmit();
+});
+
+/* ---------------- controlled booking assistant ---------------- */
+
+function assistantMessage(text, type, pending) {
+  const art = el('article', type);
+  if (type === 'assistant') art.append(el('span', 'avatar', 'M'));
+  const body = el('div');
+  // Replies are multi-line lists; render each line as its own paragraph so no
+  // markup is ever injected.
+  String(text).split(/\r?\n/).forEach(line => body.append(el('p', null, line)));
+  if (pending) body.append(el('span', 'citation', 'Awaiting your confirmation — reply yes or no'));
+  art.append(body);
+  $('#asst-messages').append(art);
+  $('#asst-messages').scrollTop = $('#asst-messages').scrollHeight;
+}
+
+$('#asst-form').onsubmit = async e => {
+  e.preventDefault();
+  const text = $('#asst-input').value.trim();
+  if (!text) return;
+  assistantMessage(text, 'user');
+  $('#asst-input').value = '';
+  try {
+    const data = await api('/api/assistant', { method: 'POST', body: JSON.stringify({ message: text }) });
+    assistantMessage(data.reply, 'assistant', data.requires_confirmation);
+    if (data.action === 'created' || data.action === 'cancelled') loadMyBookings();
+  } catch (err) { assistantMessage(err.message, 'assistant'); }
+};
+
+$$('#assistant .suggestions button').forEach(b => b.onclick = () => {
+  $('#asst-input').value = b.textContent;
+  $('#asst-form').requestSubmit();
 });
 
 /* ---------------- start ---------------- */

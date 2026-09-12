@@ -129,6 +129,25 @@
       <div id="cancel-queue" class="cards"></div>
     </section>
 
+    <section id="assistant" class="panel">
+      <h2>Booking assistant</h2>
+      <p class="muted">Ask in plain language. The assistant checks real availability and always confirms before booking or cancelling.</p>
+      <div id="asst-messages" class="messages">
+        <article class="assistant"><span class="avatar">M</span><div>
+          <p>Hello. Tell me what you need — for example, "I need a room in Mumbai for 2 people from Sept 20 to Sept 23."</p>
+        </div></article>
+      </div>
+      <div class="suggestions">
+        <button>I need a room in Mumbai for 2 people from Sept 20 to Sept 23.</button>
+        <button>Show my upcoming bookings</button>
+        <button>Cancel my booking</button>
+      </div>
+      <form id="asst-form" class="composer">
+        <input id="asst-input" placeholder="Ask the booking assistant…" autocomplete="off">
+        <button class="primary">Send</button>
+      </form>
+    </section>
+
     <section id="chat" class="panel">
       <h2>Hotel information</h2>
       <div id="messages" class="messages">

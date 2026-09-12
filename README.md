@@ -2,7 +2,8 @@
 
 AROHAK hackathon submission. A hotel booking system with authentication,
 role-based access, hotel and room management, availability search, safe booking,
-a cancellation workflow with staff review, and a grounded PDF chatbot.
+a cancellation workflow with staff review, a controlled natural-language booking
+assistant, and a grounded PDF chatbot.
 
 Requirements: [docs/AROHAK_PROBLEM_STATEMENT.md](docs/AROHAK_PROBLEM_STATEMENT.md)
 Current state: [PROJECT_STATUS.md](PROJECT_STATUS.md)
@@ -44,8 +45,9 @@ be self-registered — an administrator creates them via `POST /api/staff`.
 python -m unittest discover -s tests -v
 ```
 
-56 tests: authentication and roles, hotel and room management, availability,
-booking, concurrency, the cancellation lifecycle, and the grounded chatbot.
+94 tests: authentication and roles, hotel and room management, availability,
+booking, concurrency, the cancellation lifecycle, dashboards, the grounded
+chatbot, and the controlled booking assistant.
 
 ## Roles
 
@@ -88,7 +90,8 @@ rooms and bookings but cannot change hotel information or the room inventory.
 | POST | `/api/bookings/{id}/cancel` | owner or staff |
 | GET | `/api/cancellations` | ADMIN, RECEPTIONIST |
 | POST | `/api/bookings/{id}/approve-cancellation` · `/reject-cancellation` | ADMIN, RECEPTIONIST |
-| POST | `/api/chat` | public |
+| POST | `/api/assistant` | CUSTOMER — natural-language booking assistant |
+| POST | `/api/chat` | public — grounded PDF chatbot |
 
 ## Architecture
 
@@ -102,6 +105,7 @@ Organization -> Hotel -> Room -> Booking
 - `hotel.py` — hotel and individual room management
 - `booking.py` — availability, atomic booking, cancellation lifecycle
 - `rag.py` — grounded retrieval over the hotel PDF
+- `assistant.py` — controlled booking assistant and its tool layer
 - `server.py` — routing and server-side authorization
 - `static/` — role-aware single-page UI
 
@@ -137,6 +141,16 @@ When retrieval finds nothing strong enough, it says the information is not
 available rather than inventing one. This makes hallucination structurally
 impossible and needs no API key.
 
+**The booking assistant has no database access.** `assistant.py` may only call
+the seven methods on `ToolLayer` — `get_hotel`, `search_rooms`,
+`check_availability`, `get_booking`, `list_bookings`, `create_booking`,
+`cancel_booking` — and every one of them is scoped to the signed-in user, so the
+assistant cannot read or change another customer's data. It never invents
+availability: every room it names came back from a live search in that turn. It
+always asks for explicit confirmation before booking or cancelling, and the
+pending action is held server-side keyed by user id, so a client cannot forge a
+confirmation for an action that was never proposed.
+
 **The UI never uses `innerHTML`.** All text is inserted with `textContent`, so
 guest-supplied values such as names cannot inject markup.
 
@@ -151,9 +165,21 @@ guest-supplied values such as names cannot inject markup.
 - A cancelled booking cannot be cancelled again, and a pending request cannot be
   submitted twice.
 
+## Booking assistant examples
+
+Sign in as a customer and open the Booking assistant tab.
+
+- `I need a room in Mumbai for 2 people from Sept 20 to Sept 23.` → lists real
+  availability and asks you to confirm
+- `yes` → books it
+- `Show my upcoming bookings`
+- `Cancel my booking` → explains whether it cancels outright or becomes a staff
+  request, then asks you to confirm
+
 ## Demo questions for the chatbot
 
-- What time is check-in?
+- What time is check-in? *(answers 2:00 PM, citing the check-in policy)*
+- Can four guests stay in a Deluxe King room? *(answers no, capacity is 2)*
 - Is parking free?
 - What is the cancellation policy?
 - Is Wi-Fi free?

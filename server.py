@@ -14,6 +14,7 @@ from urllib.parse import parse_qs, urlparse
 
 import auth
 import db
+from assistant import BookingAssistant, ToolLayer
 from auth import AuthError, AuthStore, PermissionError_, require_role, require_user
 from booking import BookingStore
 from hotel import HotelStore
@@ -27,6 +28,8 @@ retriever = HotelRetriever()
 auth_store = AuthStore()
 hotels = HotelStore()
 bookings = BookingStore()
+# The assistant reaches application data only through this tool layer.
+assistant = BookingAssistant(ToolLayer(bookings, hotels))
 
 ROOM_ID_RE = re.compile(r"^/api/rooms/([A-Za-z0-9\-]+)(/[a-z\-]+)?$")
 BOOKING_ID_RE = re.compile(r"^/api/bookings/([A-Za-z0-9\-]+)(/[a-z\-]+)?$")
@@ -178,6 +181,11 @@ class Handler(BaseHTTPRequestHandler):
             if route == "/api/staff":
                 require_role(self.current_user(), "ADMIN")
                 return self.send_json(201, {"user": auth_store.register(payload, allow_staff=True)})
+
+            if route == "/api/assistant":
+                user = require_role(self.current_user(), "CUSTOMER")
+                message = str(payload.get("message", "")).strip()
+                return self.send_json(200, assistant.respond(user, message))
 
             if route == "/api/chat":
                 question = str(payload.get("question", "")).strip()

@@ -10,6 +10,8 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
 
 import auth as auth_module
 from auth import AuthError, AuthStore, PermissionError_, is_staff, require_role
+from assistant import (BookingAssistant, ToolLayer, extract_booking_id,
+                       extract_dates, extract_guests, extract_location)
 from booking import BookingStore
 from hotel import HotelStore
 from rag import HotelRetriever
@@ -498,6 +500,303 @@ class RagTests(unittest.TestCase):
             if result["grounded"]:
                 self.assertTrue(result["citations"], f"no citation for: {question}")
                 self.assertIn("section", result["citations"][0])
+
+
+# --------------------------------------------------------------------------
+# Grounded chatbot correctness (defects reported in browser QA)
+# --------------------------------------------------------------------------
+
+class RagCorrectnessTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.rag = HotelRetriever()
+
+    def test_checkin_answer_leads_with_checkin_not_checkout(self):
+        for question in ("What time is check-in?", "What time is check in?", "When is checkin?"):
+            result = self.rag.answer(question)
+            with self.subTest(question=question):
+                self.assertTrue(result["grounded"])
+                self.assertIn("2:00 PM", result["answer"])
+                self.assertNotIn("12:00 PM", result["answer"])
+                self.assertFalse(result["answer"].lower().startswith("standard check-out"))
+                self.assertIn("Check-in", result["citations"][0]["section"])
+
+    def test_checkout_answer_is_about_checkout(self):
+        result = self.rag.answer("What time is check-out?")
+        self.assertTrue(result["grounded"])
+        self.assertIn("12:00 PM", result["answer"])
+        self.assertIn("Check-out", result["citations"][0]["section"])
+
+    def test_named_room_over_capacity_is_refused(self):
+        result = self.rag.answer("Can four guests stay in a Deluxe King room?")
+        self.assertTrue(result["grounded"])
+        self.assertTrue(result["answer"].startswith("No."), result["answer"])
+        self.assertIn("Deluxe King", result["answer"])
+        self.assertIn("maximum capacity of 2", result["answer"])
+        self.assertEqual(result["citations"][0]["section"], "4. Room Categories")
+
+    def test_named_room_within_capacity_is_confirmed(self):
+        result = self.rag.answer("Can two guests stay in a Deluxe King room?")
+        self.assertTrue(result["answer"].startswith("Yes."), result["answer"])
+        self.assertIn("Deluxe King", result["answer"])
+
+    def test_room_for_four_guests_suggests_family_suite(self):
+        self.assertIn("Family Suite", self.rag.answer("Which room is suitable for four guests?")["answer"])
+
+    def test_capacity_beyond_every_room_is_refused(self):
+        result = self.rag.answer("Which room is suitable for five guests?")
+        self.assertIn("No room category", result["answer"])
+        self.assertIn("Family Suite", result["answer"])
+
+    def test_parking_answer(self):
+        result = self.rag.answer("Is parking free?")
+        self.assertTrue(result["grounded"])
+        self.assertIn("complimentary", result["answer"].lower())
+        self.assertTrue(result["citations"])
+
+    def test_wifi_answer(self):
+        result = self.rag.answer("Is Wi-Fi free?")
+        self.assertTrue(result["grounded"])
+        self.assertIn("wi-fi", result["answer"].lower())
+
+    def test_cancellation_policy_states_the_24_hour_rule(self):
+        result = self.rag.answer("What is the cancellation policy?")
+        self.assertTrue(result["grounded"])
+        self.assertIn("24 hours", result["answer"])
+
+    def test_faq_section_is_present_in_the_knowledge_base(self):
+        sections = [s["section"] for s in self.rag.sections]
+        self.assertTrue(any(s.startswith("11.") for s in sections), sections)
+
+    def test_answers_never_echo_raw_faq_question_markers(self):
+        for question in ("Is parking free?", "Is Wi-Fi free?", "Is breakfast included?",
+                         "Is the gym open 24 hours?", "Can I add an extra bed?"):
+            answer = self.rag.answer(question)["answer"]
+            with self.subTest(question=question):
+                self.assertNotIn("Q:", answer)
+                self.assertNotIn("A:", answer)
+
+    def test_unavailable_information_is_refused_without_citations(self):
+        for question in ("Does the hotel have a casino?", "Is there a golf course?",
+                         "Do you allow pet elephants?"):
+            result = self.rag.answer(question)
+            with self.subTest(question=question):
+                self.assertFalse(result["grounded"])
+                self.assertIn("not available", result["answer"])
+                self.assertEqual(result["citations"], [])
+
+    def test_every_grounded_answer_has_a_citation_with_an_excerpt(self):
+        for question in ("What time is check-in?", "Is parking free?", "Is Wi-Fi free?",
+                         "What is the cancellation policy?", "Is there a spa?",
+                         "Can four guests stay in a Deluxe King room?"):
+            result = self.rag.answer(question)
+            with self.subTest(question=question):
+                self.assertTrue(result["grounded"])
+                self.assertTrue(result["citations"])
+                self.assertTrue(result["citations"][0]["section"])
+                self.assertTrue(result["citations"][0]["excerpt"])
+
+
+# --------------------------------------------------------------------------
+# Section 4 — Booking dashboards
+# --------------------------------------------------------------------------
+
+class DashboardTests(TempDbTest):
+    def make_booking(self, customer, offset=5):
+        start = date.today() + timedelta(days=offset)
+        check_in, check_out = start.isoformat(), (start + timedelta(days=2)).isoformat()
+        room = self.bookings.search(check_in, check_out, 2)[0]
+        return self.bookings.create(customer, {"room_id": room["room_id"], "check_in": check_in,
+                                               "check_out": check_out, "guests": 2})
+
+    def test_customer_sees_upcoming_completed_and_cancelled(self):
+        import db
+        customer = self.customer()
+        upcoming = self.make_booking(customer, 5)
+        cancelled = self.make_booking(customer, 7)
+        self.bookings.cancel(cancelled["id"], customer["id"])
+        past = self.make_booking(customer, 9)
+        with db.connect(self.db) as conn:
+            conn.execute("UPDATE bookings SET check_in=?, check_out=? WHERE id=?",
+                         ((date.today() - timedelta(days=5)).isoformat(),
+                          (date.today() - timedelta(days=3)).isoformat(), past["id"]))
+        self.bookings.mark_completed()
+        rows = {b["id"]: b["display_status"] for b in self.bookings.list_for_customer(customer["id"])}
+        self.assertEqual(rows[upcoming["id"]], "CONFIRMED")
+        self.assertEqual(rows[cancelled["id"]], "CANCELLED")
+        self.assertEqual(rows[past["id"]], "COMPLETED")
+
+    def test_booking_details_carry_everything_a_dashboard_shows(self):
+        booking = self.make_booking(self.customer())
+        for field in ("id", "hotel_name", "room_number", "room_type", "check_in", "check_out",
+                      "guests", "total_amount", "status", "display_status", "can_cancel_directly"):
+            self.assertIn(field, booking)
+
+    def test_staff_can_filter_bookings_by_status(self):
+        customer = self.customer()
+        confirmed = self.make_booking(customer, 5)
+        cancelled = self.make_booking(customer, 7)
+        self.bookings.cancel(cancelled["id"], customer["id"])
+        ids = [b["id"] for b in self.bookings.list_all(status="CONFIRMED")]
+        self.assertIn(confirmed["id"], ids)
+        self.assertNotIn(cancelled["id"], ids)
+        self.assertEqual([b["id"] for b in self.bookings.list_all(status="CANCELLED")], [cancelled["id"]])
+
+    def test_staff_can_search_bookings_by_name_email_and_reference(self):
+        customer = self.customer("searchable@example.com")
+        booking = self.make_booking(customer)
+        for term in ("Guest", "searchable@example.com", booking["id"]):
+            with self.subTest(term=term):
+                self.assertEqual([b["id"] for b in self.bookings.list_all(query=term)], [booking["id"]])
+        self.assertEqual(self.bookings.list_all(query="nobody-matches-this"), [])
+
+
+# --------------------------------------------------------------------------
+# Section 6 — Controlled AI booking assistant
+# --------------------------------------------------------------------------
+
+class AssistantExtractionTests(unittest.TestCase):
+    def test_extracts_guests_dates_and_location_from_the_example_sentence(self):
+        sentence = "I need a room in Mumbai for 2 people from Sept 20 to Sept 23."
+        check_in, check_out = extract_dates(sentence, today=date(2026, 9, 12))
+        self.assertEqual(extract_guests(sentence), 2)
+        self.assertEqual(extract_location(sentence, "Mumbai"), "Mumbai")
+        self.assertEqual(check_in, date(2026, 9, 20))
+        self.assertEqual(check_out, date(2026, 9, 23))
+
+    def test_extracts_iso_dates(self):
+        self.assertEqual(extract_dates("book 2026-09-20 to 2026-09-23", today=date(2026, 9, 12)),
+                         (date(2026, 9, 20), date(2026, 9, 23)))
+
+    def test_extracts_relative_dates_and_night_counts(self):
+        self.assertEqual(extract_dates("tomorrow for 3 nights", today=date(2026, 9, 12)),
+                         (date(2026, 9, 13), date(2026, 9, 16)))
+
+    def test_month_name_is_not_mistaken_for_a_city(self):
+        self.assertIsNone(extract_location("from Sept 25 to Sept 27", "Mumbai"))
+
+    def test_guest_words_and_digits_both_work(self):
+        self.assertEqual(extract_guests("for two guests"), 2)
+        self.assertEqual(extract_guests("4 people"), 4)
+        self.assertIsNone(extract_guests("a quiet room"))
+
+    def test_extracts_booking_reference(self):
+        self.assertEqual(extract_booking_id("cancel MGM-ABCD1234 please"), "MGM-ABCD1234")
+        self.assertIsNone(extract_booking_id("cancel my booking"))
+
+
+class AssistantTests(TempDbTest):
+    def setUp(self):
+        super().setUp()
+        self.assistant = BookingAssistant(ToolLayer(self.bookings, self.hotels))
+        self.user = self.customer()
+
+    def say(self, message, user=None):
+        return self.assistant.respond(user or self.user, message)
+
+    def test_search_requires_confirmation_before_booking(self):
+        reply = self.say("I need a room in Mumbai for 2 people from Sept 20 to Sept 23.")
+        self.assertTrue(reply["requires_confirmation"])
+        self.assertEqual(reply["action"], "create")
+        # Nothing is booked until the customer confirms.
+        self.assertEqual(self.bookings.list_for_customer(self.user["id"]), [])
+
+    def test_confirmation_creates_the_booking(self):
+        self.say("I need a room in Mumbai for 2 people from Sept 20 to Sept 23.")
+        reply = self.say("yes")
+        self.assertEqual(reply["action"], "created")
+        self.assertEqual(len(self.bookings.list_for_customer(self.user["id"])), 1)
+
+    def test_declining_makes_no_change(self):
+        self.say("I need a room in Mumbai for 2 people from Sept 20 to Sept 23.")
+        reply = self.say("no")
+        self.assertIsNone(reply["action"])
+        self.assertEqual(self.bookings.list_for_customer(self.user["id"]), [])
+
+    def test_confirmation_without_a_proposal_does_nothing(self):
+        reply = self.say("yes")
+        self.assertIn("nothing waiting", reply["reply"])
+        self.assertEqual(self.bookings.list_for_customer(self.user["id"]), [])
+
+    def test_assistant_asks_for_missing_details(self):
+        reply = self.say("I need a room for 3 people")
+        self.assertIn("check-in date", reply["reply"])
+        self.assertFalse(reply["requires_confirmation"])
+
+    def test_follow_up_completes_the_search(self):
+        self.say("I need a room for 3 people")
+        reply = self.say("from Sept 25 to Sept 27")
+        self.assertTrue(reply["requires_confirmation"])
+        self.assertIn("available", reply["reply"])
+
+    def test_other_cities_are_refused_rather_than_invented(self):
+        reply = self.say("I need a room in Delhi for 2 people from Sept 20 to Sept 23.")
+        self.assertIn("Delhi", reply["reply"])
+        self.assertFalse(reply["requires_confirmation"])
+
+    def test_availability_is_never_invented_when_nothing_is_free(self):
+        # Take every room for the window, then ask.
+        check_in = (date.today() + timedelta(days=30)).isoformat()
+        check_out = (date.today() + timedelta(days=32)).isoformat()
+        for room in self.bookings.search(check_in, check_out, 1):
+            self.bookings.create(self.user, {"room_id": room["room_id"], "check_in": check_in,
+                                             "check_out": check_out, "guests": 1})
+        reply = self.say(f"I need a room for 2 people from {check_in} to {check_out}")
+        self.assertIn("no rooms", reply["reply"].lower())
+        self.assertFalse(reply["requires_confirmation"])
+
+    def test_lists_upcoming_bookings(self):
+        self.say("I need a room in Mumbai for 2 people from Sept 20 to Sept 23.")
+        self.say("yes")
+        reply = self.say("show my upcoming bookings")
+        self.assertIn("1 upcoming booking", reply["reply"])
+
+    def test_booking_details_by_reference(self):
+        self.say("I need a room in Mumbai for 2 people from Sept 20 to Sept 23.")
+        booking_id = self.say("yes")["data"]["booking"]["id"]
+        reply = self.say(f"show details for {booking_id}")
+        self.assertIn(booking_id, reply["reply"])
+
+    def test_cancellation_requires_confirmation_then_cancels(self):
+        self.say("I need a room in Mumbai for 2 people from Sept 20 to Sept 23.")
+        booking_id = self.say("yes")["data"]["booking"]["id"]
+        proposal = self.say("cancel my booking")
+        self.assertTrue(proposal["requires_confirmation"])
+        self.assertEqual(proposal["action"], "cancel")
+        self.assertEqual(self.bookings.get(booking_id)["status"], "CONFIRMED")
+        reply = self.say("yes")
+        self.assertEqual(reply["action"], "cancelled")
+        self.assertEqual(self.bookings.get(booking_id)["status"], "CANCELLED")
+
+    def test_assistant_cannot_reach_another_customers_booking(self):
+        self.say("I need a room in Mumbai for 2 people from Sept 20 to Sept 23.")
+        booking_id = self.say("yes")["data"]["booking"]["id"]
+        intruder = self.customer("intruder@example.com")
+        reply = self.say(f"show details for {booking_id}", user=intruder)
+        self.assertIn("could not find", reply["reply"])
+        reply = self.say(f"cancel {booking_id}", user=intruder)
+        self.assertIn("could not find", reply["reply"])
+        self.assertEqual(self.bookings.get(booking_id)["status"], "CONFIRMED")
+
+    def test_pending_action_is_per_user(self):
+        self.say("I need a room in Mumbai for 2 people from Sept 20 to Sept 23.")
+        other = self.customer("other@example.com")
+        # The other customer's "yes" must not execute this customer's proposal.
+        self.say("yes", user=other)
+        self.assertEqual(self.bookings.list_for_customer(other["id"]), [])
+        self.assertEqual(self.bookings.list_for_customer(self.user["id"]), [])
+
+    def test_tool_layer_exposes_no_database_handle(self):
+        tools = ToolLayer(self.bookings, self.hotels)
+        public = sorted(name for name in dir(tools) if not name.startswith("_"))
+        self.assertEqual(public, sorted([
+            "cancel_booking", "check_availability", "create_booking", "get_booking",
+            "get_hotel", "list_bookings", "search_rooms"]))
+
+    def test_unknown_requests_are_handled_gracefully(self):
+        reply = self.say("what is the weather in Paris")
+        self.assertFalse(reply["requires_confirmation"])
+        self.assertIn("I can search for rooms", reply["reply"])
 
 
 if __name__ == "__main__":
