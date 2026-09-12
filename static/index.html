@@ -10,13 +10,17 @@
   <div class="brand"><span class="mark">M</span>
     <div><strong id="hotel-name">Meridian Grand</strong><small id="hotel-city">Mumbai</small></div>
   </div>
+  <div class="portal hidden" id="portal">
+    <strong id="portal-title"></strong>
+    <span id="portal-subtitle"></span>
+  </div>
   <div class="account hidden" id="account">
-    <span id="avatar" class="avatar-lg"></span>
+    <span id="role-badge" class="role-badge"></span>
     <div class="who-block">
       <strong id="who-name"></strong>
       <span id="who-context" class="who"></span>
     </div>
-    <span id="role-badge" class="badge role-badge"></span>
+    <span id="avatar" class="avatar-lg"></span>
     <button id="logout" class="link">Sign out</button>
   </div>
 </header>
@@ -26,16 +30,28 @@
   <section id="gate" class="panel active">
     <div class="gate-grid">
       <div class="hotel-card">
-        <h1 id="gate-hotel">The Meridian Grand Mumbai</h1>
-        <p id="gate-address" class="muted"></p>
-        <p id="gate-desc"></p>
+        <h1>The Meridian Grand</h1>
+        <p class="tagline">Hotel Booking &amp; Operations Platform</p>
+        <p class="lede">Search rooms, manage reservations and access hotel information.</p>
+        <ul class="features">
+          <li><span class="tick">&#10003;</span><div><strong>Live availability</strong>
+            <small>Real inventory, with overlap protection on every booking.</small></div></li>
+          <li><span class="tick">&#10003;</span><div><strong>Secure role-based access</strong>
+            <small>Hashed passwords and server-side authorization on every request.</small></div></li>
+          <li><span class="tick">&#10003;</span><div><strong>PDF-grounded hotel assistant</strong>
+            <small>Answers cite the hotel document, and refuse what it does not contain.</small></div></li>
+        </ul>
         <dl class="facts">
+          <div><dt>Hotel</dt><dd id="gate-hotel"></dd></div>
+          <div><dt>Address</dt><dd id="gate-address"></dd></div>
           <div><dt>Contact</dt><dd id="gate-phone"></dd></div>
           <div><dt>Email</dt><dd id="gate-email"></dd></div>
           <div><dt>Status</dt><dd id="gate-status"></dd></div>
         </dl>
+        <p id="gate-desc" class="hidden"></p>
       </div>
       <div class="auth-card">
+        <h2 class="auth-heading">Sign In</h2>
         <div class="switch">
           <button class="swtab active" data-form="login">Sign in</button>
           <button class="swtab" data-form="register">Create account</button>
@@ -55,6 +71,36 @@
           <button class="primary">Create account</button>
           <p id="register-error" class="error"></p>
         </form>
+
+        <div class="demo-block">
+          <h3>Hackathon Demo Access</h3>
+          <p class="muted">Seeded demo accounts for evaluation. Buttons fill the sign-in
+            form — review and press Sign In yourself.</p>
+
+          <article class="demo-card role-customer">
+            <div>
+              <strong>CUSTOMER</strong>
+              <small>Search rooms, book stays and use both assistants.</small>
+            </div>
+            <button id="demo-customer" type="button">Register / Continue as Customer</button>
+          </article>
+
+          <article class="demo-card role-admin">
+            <div>
+              <strong>HOTEL ADMIN</strong>
+              <small>Manage hotel, rooms, bookings and hotel PDF.</small>
+            </div>
+            <button id="demo-admin" type="button">Use Admin Demo</button>
+          </article>
+
+          <article class="demo-card role-reception">
+            <div>
+              <strong>RECEPTIONIST</strong>
+              <small>Manage assigned rooms, bookings and cancellations.</small>
+            </div>
+            <button id="demo-reception" type="button">Use Receptionist Demo</button>
+          </article>
+        </div>
       </div>
     </div>
   </section>

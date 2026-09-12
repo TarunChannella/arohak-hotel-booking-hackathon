@@ -64,6 +64,22 @@ const ROLE_LABELS = {
   CUSTOMER: 'CUSTOMER',
 };
 
+const PORTALS = {
+  CUSTOMER: ['Customer Portal', 'Search rooms and manage your stays'],
+  ADMIN: ['Hotel Administration', 'Manage hotel operations and knowledge'],
+  ORGANIZATION_ADMIN: ['Organization Administration', 'Manage hotels, rooms and staff'],
+  PRODUCT_ADMIN: ['Platform Administration', 'Manage organizations across the platform'],
+  RECEPTIONIST: ['Reception Desk', 'Manage assigned bookings and availability'],
+};
+
+// Plain Unicode only, so every glyph renders without a webfont.
+const TAB_ICONS = {
+  search: '\u25A6', mybookings: '\u2630', assistant: '\u2709', chat: '\u2139',
+  'staff-bookings': '\u2630', cancellations: '\u21BA', 'manage-rooms': '\u25A6',
+  'manage-hotel': '\u2302', 'manage-document': '\u2637', organizations: '\u25C8',
+  'manage-hotels': '\u2302', assignments: '\u263A',
+};
+
 // Navigation is generated per role. A tab a role may not use is never rendered,
 // and the server authorizes every request regardless of what the UI shows.
 const TABS = {
@@ -102,7 +118,9 @@ function buildTabs() {
   const nav = $('#tabs');
   nav.textContent = '';
   (TABS[me.role] || TABS.CUSTOMER).forEach(([id, label], i) => {
-    const b = el('button', 'tab' + (i === 0 ? ' active' : ''), label);
+    const b = el('button', 'tab' + (i === 0 ? ' active' : ''));
+    if (TAB_ICONS[id]) b.append(el('span', 'ico', TAB_ICONS[id]));
+    b.append(document.createTextNode(label));
     b.dataset.tab = id;
     b.onclick = () => showTab(id);
     nav.append(b);
@@ -123,7 +141,13 @@ function renderHeader() {
   if (!me) return;
   $('#avatar').textContent = (me.name || '?').trim().charAt(0).toUpperCase();
   $('#who-name').textContent = me.name;
-  $('#role-badge').textContent = ROLE_LABELS[me.role] || me.role;
+  const badge = $('#role-badge');
+  badge.textContent = ROLE_LABELS[me.role] || me.role;
+  badge.className = 'role-badge role-' + me.role;
+  const [title, subtitle] = PORTALS[me.role] || PORTALS.CUSTOMER;
+  $('#portal-title').textContent = title;
+  $('#portal-subtitle').textContent = subtitle;
+  $('#portal').classList.remove('hidden');
   const parts = [];
   if (selection.organization_name) parts.push(selection.organization_name);
   else if (me.organization_id) parts.push(me.organization_id);
@@ -138,6 +162,7 @@ async function refreshSession() {
   $('#gate').classList.toggle('active', !signedIn);
   $('#app').classList.toggle('hidden', !signedIn);
   $('#account').classList.toggle('hidden', !signedIn);
+  $('#portal').classList.toggle('hidden', !signedIn);
   if (signedIn) {
     await loadOrganizationChoices();
     renderHeader();
@@ -156,6 +181,37 @@ $$('.swtab').forEach(b => b.onclick = () => {
   $('#login-form').classList.toggle('hidden', b.dataset.form !== 'login');
   $('#register-form').classList.toggle('hidden', b.dataset.form !== 'register');
 });
+
+// Seeded demo accounts, documented in the README. The form is filled but never
+// submitted automatically, so the judge sees exactly what is being signed in.
+const DEMO_LOGINS = {
+  admin: 'admin@meridiangrand.example',
+  reception: 'reception@meridiangrand.example',
+};
+const DEMO_PASSWORD = 'Hackathon2026';
+
+function useDemo(which) {
+  $$('.swtab').forEach(x => x.classList.toggle('active', x.dataset.form === 'login'));
+  $('#login-form').classList.remove('hidden');
+  $('#register-form').classList.add('hidden');
+  $('#li-email').value = DEMO_LOGINS[which];
+  $('#li-password').value = DEMO_PASSWORD;
+  $('#login-error').textContent = '';
+  $('#li-email').scrollIntoView({ block: 'center' });
+  $('#li-password').focus();
+  toast('Demo credentials filled. Press Sign In to continue.');
+}
+
+$('#demo-admin').onclick = () => useDemo('admin');
+$('#demo-reception').onclick = () => useDemo('reception');
+$('#demo-customer').onclick = () => {
+  $$('.swtab').forEach(x => x.classList.toggle('active', x.dataset.form === 'register'));
+  $('#login-form').classList.add('hidden');
+  $('#register-form').classList.remove('hidden');
+  $('#register-error').textContent = '';
+  $('#rg-name').scrollIntoView({ block: 'center' });
+  $('#rg-name').focus();
+};
 
 $('#login-form').onsubmit = async e => {
   e.preventDefault();
@@ -260,6 +316,7 @@ async function loadHotel() {
   $('#hotel-city').textContent = hotel.city;
   $('#gate-hotel').textContent = hotel.name;
   $('#gate-address').textContent = hotel.address + ', ' + hotel.city;
+  $('#gate-desc').textContent = hotel.description || '';
   $('#gate-desc').textContent = hotel.description;
   $('#gate-phone').textContent = hotel.contact_number;
   $('#gate-email').textContent = hotel.email;
@@ -319,7 +376,11 @@ $('#search-form').onsubmit = async e => {
   busy(box, 'Checking availability…');
   try {
     const data = await api('/api/availability?' + new URLSearchParams(lastSearch));
-    if (!data.rooms.length) { box.append(el('p', 'notice', 'No rooms available for those dates and guest count.')); return; }
+    if (!data.rooms.length) {
+      box.append(el('p', 'notice',
+        'No rooms match those dates and guest count at this hotel. Try different dates.'));
+      return;
+    }
     data.rooms.forEach(r => box.append(roomCard(r)));
   } catch (err) { box.append(el('p', 'notice', err.message)); }
 };
@@ -359,7 +420,7 @@ function bookingCard(b, staff) {
 
   const actions = el('div', 'actions');
   if (b.status === 'CONFIRMED' && !b.is_past) {
-    const btn = el('button', null, b.can_cancel_directly ? 'Cancel booking' : 'Request cancellation');
+    const btn = el('button', 'danger', b.can_cancel_directly ? 'Cancel booking' : 'Request cancellation');
     btn.title = b.can_cancel_directly
       ? 'Free cancellation until the day before check-in.'
       : 'Past the 24-hour deadline, so staff must review this request.';
@@ -369,7 +430,7 @@ function bookingCard(b, staff) {
   if (staff && b.status === 'CANCELLATION_REQUESTED') {
     const ok = el('button', 'primary', 'Approve');
     ok.onclick = () => review(b.id, true);
-    const no = el('button', null, 'Reject');
+    const no = el('button', 'danger', 'Reject');
     no.onclick = () => review(b.id, false);
     actions.append(ok, no);
   }
@@ -415,7 +476,11 @@ async function loadMyBookings() {
   try {
     const data = await api('/api/bookings');
     const rows = data.bookings.filter(matchesFilter);
-    if (!rows.length) { box.append(el('p', 'notice', 'No bookings to show.')); return; }
+    if (!rows.length) {
+      box.append(el('p', 'notice',
+        'No bookings in this view yet. Use Find Room to search availability and make one.'));
+      return;
+    }
     rows.forEach(b => box.append(bookingCard(b, false)));
   } catch (err) { box.append(el('p', 'notice', err.message)); }
 }
@@ -434,7 +499,10 @@ async function loadAllBookings() {
   if ($('#bk-status').value) params.set('status', $('#bk-status').value);
   try {
     const data = await api('/api/bookings?' + params);
-    if (!data.bookings.length) { box.append(el('p', 'notice', 'No bookings match.')); return; }
+    if (!data.bookings.length) {
+      box.append(el('p', 'notice', 'No bookings match this search or filter.'));
+      return;
+    }
     data.bookings.forEach(b => box.append(bookingCard(b, true)));
   } catch (err) { box.append(el('p', 'notice', err.message)); }
 }
@@ -446,7 +514,11 @@ async function loadCancellations() {
   box.textContent = '';
   try {
     const data = await api('/api/cancellations');
-    if (!data.bookings.length) { box.append(el('p', 'notice', 'No cancellation requests awaiting review.')); return; }
+    if (!data.bookings.length) {
+      box.append(el('p', 'notice',
+        'Nothing awaiting review. Late cancellation requests appear here for a decision.'));
+      return;
+    }
     data.bookings.forEach(b => box.append(bookingCard(b, true)));
   } catch (err) { box.append(el('p', 'notice', err.message)); }
 }
@@ -478,7 +550,7 @@ async function loadRoomsAdmin() {
       actions.append(price);
       if (me.role === 'ADMIN') {
         const active = room.availability_status === 'ACTIVE';
-        const btn = el('button', null, active ? 'Deactivate' : 'Activate');
+        const btn = el('button', active ? 'danger' : null, active ? 'Deactivate' : 'Activate');
         btn.onclick = () => setRoomStatus(room.id, active ? 'deactivate' : 'activate');
         actions.append(btn);
       }
