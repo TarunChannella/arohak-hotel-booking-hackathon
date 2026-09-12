@@ -15,7 +15,7 @@
 | Item | Value |
 |---|---|
 | Branch | `main` (feature/multi-organization merged, no fast-forward) |
-| Latest commit | see section 16 |
+| Latest commit | `d616b8f` |
 | Remote | `https://github.com/TarunChannella/arohak-hotel-booking-hackathon.git` |
 | Pushed | **No.** Awaiting the Sprint 1 push window (12:45–1:00 PM IST). |
 
