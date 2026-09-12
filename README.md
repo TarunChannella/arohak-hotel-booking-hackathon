@@ -2,8 +2,8 @@
 
 AROHAK hackathon submission. A hotel booking system with authentication,
 role-based access, hotel and room management, availability search, safe booking,
-a cancellation workflow with staff review, a controlled natural-language booking
-assistant, and a grounded PDF chatbot.
+a cancellation workflow with staff review, multi-organization isolation, a
+controlled natural-language booking assistant, and a PDF-grounded chatbot.
 
 Requirements: [docs/AROHAK_PROBLEM_STATEMENT.md](docs/AROHAK_PROBLEM_STATEMENT.md)
 Current state: [PROJECT_STATUS.md](PROJECT_STATUS.md)
@@ -53,27 +53,40 @@ be self-registered — an administrator creates them via `POST /api/staff`.
 python -m unittest discover -s tests -v
 ```
 
-120 tests: authentication and roles, hotel and room management, availability,
+155 tests: authentication and roles, hotel and room management, availability,
 booking, concurrency, the cancellation lifecycle, dashboards, PDF ingestion and
-upload validation, the grounded chatbot, and the controlled booking assistant.
-The ingestion tests run the actual supplied PDF through the real extraction path.
+upload validation, the grounded chatbot, the controlled booking
+assistant, and multi-organization isolation. The ingestion tests run the actual
+supplied PDF through the real extraction path.
 
 ## Roles
 
-| Capability | ADMIN | RECEPTIONIST | CUSTOMER |
-|---|:--:|:--:|:--:|
-| Edit hotel details | ✅ | — | — |
-| Create / deactivate rooms | ✅ | — | — |
-| Edit room details and availability | ✅ | ✅ | — |
-| View all bookings, search and filter | ✅ | ✅ | — |
-| Approve / reject cancellation requests | ✅ | ✅ | — |
-| Browse rooms and check availability | ✅ | ✅ | ✅ |
-| Book a room | — | — | ✅ |
-| View own bookings | — | — | ✅ |
-| Cancel own booking | — | — | ✅ |
+`ADMIN` is the original single-hotel name for `ORGANIZATION_ADMIN`; both have
+the same rights and the seeded demo account keeps working.
+
+| Capability | PRODUCT_ADMIN | ORGANIZATION_ADMIN / ADMIN | RECEPTIONIST | CUSTOMER |
+|---|:--:|:--:|:--:|:--:|
+| Create and manage organizations | ✅ | — | — | — |
+| See every organization | ✅ | — | — | — |
+| Add hotels to own organization | ✅ | ✅ | — | — |
+| Assign receptionists to hotels | ✅ | ✅ | — | — |
+| Edit hotel details | ✅ | ✅ | — | — |
+| Create / deactivate rooms | ✅ | ✅ | — | — |
+| Edit room details and availability | ✅ | ✅ | ✅ | — |
+| View bookings, search and filter | ✅ | ✅ | ✅ | — |
+| Approve / reject cancellation requests | ✅ | ✅ | ✅ | — |
+| Replace the hotel PDF | ✅ | ✅ | — | — |
+| Browse hotels and check availability | ✅ | ✅ | ✅ | ✅ |
+| Book a room | — | — | — | ✅ |
+| View and cancel own bookings | — | — | — | ✅ |
+
+A receptionist sees only the hotels assigned to it, and an organization admin
+only its own organization. Staff outside an organization get no rows rather
+than another organization's data.
 
 Receptionists deliberately hold no admin-level functionality: they maintain
-rooms and bookings but cannot change hotel information or the room inventory.
+rooms and bookings on their assigned hotels but cannot change hotel
+information, the room inventory, the hotel PDF, or anything in another hotel.
 
 ## API
 
@@ -86,13 +99,21 @@ rooms and bookings but cannot change hotel information or the room inventory.
 | GET | `/api/auth/me` | public |
 | POST | `/api/staff` | ADMIN |
 | GET | `/api/users` | ADMIN |
-| GET | `/api/hotel` | public |
+| GET | `/api/organizations` | public lists active; staff see their own, PRODUCT_ADMIN sees all |
+| POST | `/api/organizations` | PRODUCT_ADMIN |
+| PUT | `/api/organizations/{id}` | PRODUCT_ADMIN |
+| GET | `/api/hotels?organization_id=` | scoped to the caller |
+| POST | `/api/hotels` | PRODUCT_ADMIN, ORGANIZATION_ADMIN |
+| GET | `/api/hotels/{id}` · `/rooms` | scoped to the caller |
+| PUT | `/api/hotels/{id}` | admins, own organization only |
+| POST | `/api/assignments` | admins — assign a receptionist to a hotel |
+| GET | `/api/hotel` | public — the default hotel |
 | PUT | `/api/hotel` | ADMIN |
 | GET | `/api/rooms` | public (staff also see inactive rooms) |
 | POST | `/api/rooms` | ADMIN |
 | PUT | `/api/rooms/{id}` | ADMIN, RECEPTIONIST |
 | POST | `/api/rooms/{id}/activate` · `/deactivate` | ADMIN |
-| GET | `/api/availability?check_in&check_out&guests` | public |
+| GET | `/api/availability?check_in&check_out&guests&hotel_id` | public |
 | POST | `/api/bookings` | CUSTOMER |
 | GET | `/api/bookings` | own bookings; staff see all, with `?q=` and `?status=` |
 | GET | `/api/bookings/{id}` | owner or staff |
@@ -115,6 +136,7 @@ Organization -> Hotel -> Room -> Booking
 - `auth.py` — PBKDF2 password hashing, sessions, role checks
 - `hotel.py` — hotel and individual room management
 - `booking.py` — availability, atomic booking, cancellation lifecycle
+- `organization.py` — organizations, multi-hotel support, receptionist assignments
 - `ingest.py` — PDF extraction, chunking, validation and indexing
 - `rag.py` — grounded retrieval over the extracted PDF chunks
 - `assistant.py` — controlled booking assistant and its tool layer
@@ -143,9 +165,12 @@ the booking then stays confirmed, so the room must stay held until the decision
 is made. Approval cancels the booking and frees the room; rejection restores it
 to CONFIRMED.
 
-**`organization_id` is present from the start** on users, hotels and bookings,
-with a seeded default organization, so the multi-organization extension can be
-layered on without rebuilding the MVP.
+**Organizations are isolated at the query level, not in the UI.** Every staff
+read and write is filtered by the hotels the acting user may reach:
+`accessible_hotel_ids()` returns `None` for a product admin, the assigned
+hotels for a receptionist, and the organization's hotels for an organization
+admin. A request for another organization's hotel raises an authorization
+failure, and a listing returns no rows rather than someone else's data.
 
 **The PDF is the source of truth for the chatbot.** On startup `ingest.py`
 extracts the text of the hotel's PDF with pypdf, splits it at its own headings

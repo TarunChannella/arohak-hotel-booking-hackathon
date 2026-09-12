@@ -7,6 +7,7 @@ import json
 import mimetypes
 import os
 import re
+from datetime import UTC, datetime
 from http.cookies import SimpleCookie
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -397,9 +398,18 @@ def seed_demo_accounts():
     created = []
     for name, email, role in demo:
         try:
-            auth_store.register({"name": name, "email": email, "password": password, "role": role},
-                                allow_staff=True)
+            user = auth_store.register(
+                {"name": name, "email": email, "password": password, "role": role},
+                allow_staff=True)
             created.append(f"{role}: {email}")
+            if role == "RECEPTIONIST":
+                # A receptionist only sees hotels assigned to it, so the demo
+                # account needs the seeded hotel or it would see nothing.
+                with db.connect(db.database_path()) as conn:
+                    conn.execute(
+                        "INSERT OR IGNORE INTO receptionist_hotels VALUES (?,?,?)",
+                        (user["id"], db.DEFAULT_HOTEL_ID,
+                         datetime.now(UTC).isoformat(timespec="seconds")))
         except AuthError:
             pass  # already present
     return created

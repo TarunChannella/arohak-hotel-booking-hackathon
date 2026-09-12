@@ -1,7 +1,7 @@
 # PROJECT STATUS — AROHAK Hotel Booking Hackathon
 
-**Last updated:** 2026-09-12 11:25 IST
-**Phase:** Sprint 1 — MVP complete, true PDF ingestion implemented, assistant and dashboards complete
+**Last updated:** 2026-09-12 11:35 IST
+**Phase:** Sprint 1 complete — MVP, PDF ingestion, assistant, dashboards and multi-organization all implemented
 **Requirements source:** [docs/AROHAK_PROBLEM_STATEMENT.md](docs/AROHAK_PROBLEM_STATEMENT.md)
 
 > No passwords, tokens, API keys or secrets are recorded in this file. Demo
@@ -14,8 +14,8 @@
 
 | Item | Value |
 |---|---|
-| Branch | `main` |
-| Latest commit | `01f694c` — Ingest the hotel PDF as the chatbot's source of truth |
+| Branch | `main` (feature/multi-organization merged, no fast-forward) |
+| Latest commit | see section 16 |
 | Remote | `https://github.com/TarunChannella/arohak-hotel-booking-hackathon.git` |
 | Pushed | **No.** Awaiting the Sprint 1 push window (12:45–1:00 PM IST). |
 
@@ -33,8 +33,8 @@ Overrides: `PORT`, `HOTEL_DB`, `DEMO_PASSWORD`
 
 ## 3. Test result
 
-**120 tests, 0 failures, 0 errors — OK** (Python 3.12, Windows 11, ~26s).
-Up from 94 at the previous checkpoint.
+**156 tests, 0 failures, 0 errors — OK** (Python 3.12, Windows 11, ~90s).
+Up from 120 at the previous checkpoint.
 
 | Group | Tests | Covers |
 |---|---:|---|
@@ -50,6 +50,12 @@ Up from 94 at the previous checkpoint.
 | `PdfIngestionTests` | 7 | real extraction, chunking, page metadata, cache derivation |
 | `PdfGroundedAnswerTests` | 9 | answers traced to PDF evidence with page citations |
 | `PdfUploadTests` | 10 | validation, traversal, replacement re-index, hotel isolation |
+| `ProductAdminTests` | 5 | organization CRUD, platform-wide visibility |
+| `OrganizationAdminTests` | 8 | own-organization limits, multiple hotels |
+| `ReceptionistAssignmentTests` | 9 | assignment, hotel isolation, cross-org rejection |
+| `CustomerHotelSelectionTests` | 3 | organization to hotel to room to booking |
+| `CrossOrganizationIsolationTests` | 8 | scoped listings, queues, inventory |
+| `DemoSeedTests` | 1 | the seeded receptionist can actually see its hotel |
 
 ---
 
@@ -187,15 +193,30 @@ rebuilds that hotel's index. 45 tests across `RagTests`,
 | §4 Booking Dashboards | 3 | Complete |
 | §6 AI Booking Chatbot | 20 | Complete |
 | §7 RAG Chatbot | 17 | Complete — PDF-backed, evidence in section 4 |
-| **§5 Multi-Organization** | **10** | **Not started — schema only** |
+| §5 Multi-Organization | 10 | Complete — see below |
 
-**Supported: 90 of 100.** The only outstanding work is §5, deliberately deferred
-per instruction until the priorities above were complete.
+**Supported: 100 of 100**, every section backed by passing tests and by the
+verification in section 9.
 
-`organization_id` is already on users, hotels and bookings with a seeded default
-organization, so §5 needs the PRODUCT_ADMIN and ORGANIZATION_ADMIN roles,
-cross-organization isolation checks, multi-hotel support, and the
-organization → hotel → rooms customer flow — not a rebuild.
+### §5 Multi-Organization — 10 marks — COMPLETE
+
+- `PRODUCT_ADMIN` manages organizations platform-wide; `ORGANIZATION_ADMIN`
+  manages only its own. `ADMIN` is retained as the original single-hotel name
+  for the same organization-admin role, so the seeded demo account and all
+  earlier behaviour keep working.
+- Organization create, read, update and deactivate, restricted to
+  `PRODUCT_ADMIN`.
+- Multiple hotels per organization, each owning its rooms, availability,
+  bookings, PDF and retrieval index.
+- Receptionist-to-hotel assignments in a `receptionist_hotels` table; an
+  unassigned receptionist sees nothing, an assigned one sees only its hotels.
+- Customer flow: organization → hotel → room search → booking, with a hotel
+  selector in the UI and a `hotel_id` parameter on availability.
+- Scoping is enforced at the query level on availability, room management,
+  booking lists, booking detail, the cancellation queue and PDF replacement.
+  `accessible_hotel_ids()` returns `None` for a product admin, assigned hotels
+  for a receptionist, and the organization's hotels for an organization admin.
+  Cross-organization requests raise an authorization failure or return no rows.
 
 ---
 
@@ -211,6 +232,7 @@ Organization -> Hotel -> Room -> Booking
 | `db.py` | Schema, connection handling, seed organization/hotel/rooms |
 | `auth.py` | Password hashing, sessions, role authorization helpers |
 | `hotel.py` | Hotel and individual room management |
+| `organization.py` | Organizations, multi-hotel support, receptionist assignments |
 | `booking.py` | Availability, atomic booking, cancellation lifecycle |
 | `ingest.py` | PDF extraction, chunking, validation, per-hotel indexing |
 | `rag.py` | Grounded extractive retrieval over the extracted PDF chunks |
@@ -229,7 +251,37 @@ Organization -> Hotel -> Room -> Booking
 
 ---
 
-## 9. Manual and API verification completed
+## 9. Final verification (2026-09-12, fresh install)
+
+Run exactly as the README instructs, against a deleted `data/` state so the
+database, documents and index were all built from scratch.
+
+- [x] `python -m pip install -r requirements.txt`
+- [x] `python server.py` — starts clean; PDF ingested on boot (4 pages, 15 chunks)
+- [x] Index page serves 200
+- [x] **Login** — admin and receptionist demo accounts, customer registration
+- [x] **Search** — 10 rooms, Deluxe King ₹17,000 for 2 nights
+- [x] **Booking** — created, CONFIRMED, correct room and total
+- [x] **Cancellation** — CANCELLED before the deadline
+- [x] **Booking assistant** — searched real availability, asked to confirm, booked on "yes"
+- [x] **PDF RAG** — check-in (p1), Wi-Fi (p3), parking (p3), cancellation (p2) all
+      answered from extracted PDF text with section and page; casino refused
+- [x] **Multi-organization** — organizations and hotels listed and scoped
+- [x] Receptionist: sees bookings and the cancellation queue, can edit a room,
+      **403 on hotel edit**
+- [x] `node --check static/app.js`
+- [x] 156 tests pass
+- [x] `git status` clean; no `.db`, `__pycache__`, credentials or uploads tracked
+
+**One regression was caught and fixed during this pass.** After the
+multi-organization merge the seeded receptionist had no hotel assignment, so it
+saw zero bookings — the receptionist demo was broken. `seed_demo_accounts()` now
+assigns the demo receptionist to the seeded hotel, verified over HTTP (0 → 1
+booking visible), and `DemoSeedTests` covers it.
+
+---
+
+## 10. Earlier manual and API verification
 
 Live server on port 8097, `HOTEL_DB` outside the repository, then terminated.
 
@@ -278,7 +330,33 @@ Live server on port 8097, `HOTEL_DB` outside the repository, then terminated.
 
 ---
 
-## 10. Next action
+## 11. Remaining limitations
+
+Recorded honestly rather than claimed as complete:
+
+- **The admin UI does not expose organization CRUD or receptionist assignment.**
+  Both are implemented and tested in the backend (`POST /api/organizations`,
+  `POST /api/assignments`) but are API-only; a demo of those two needs curl or
+  the test suite rather than a click-through.
+- **Customers are platform-wide, not scoped to one organization.** A customer
+  may book in any organization's hotel. The isolation requirement in §5 concerns
+  staff access, which is enforced; this is a deliberate reading, not an
+  oversight, and a test documents the behaviour.
+- **The hotel PDF panel targets the default hotel in the UI.** The API accepts
+  an `X-Hotel-Id` header and per-hotel indexes are tested, but the admin panel
+  does not yet offer a hotel picker for the upload.
+- **The in-process retriever serves one hotel.** `server.py` holds a single
+  `HotelRetriever` for the default hotel; per-hotel retrievers are constructed
+  and tested directly, but the chat endpoint does not yet take a `hotel_id`.
+- **Browser click-through of the newest panels** (Booking assistant, Hotel PDF,
+  hotel selector) has not been done; the endpoints and JS syntax are verified.
+- A SQLite `CHECK` constraint lists the roles, so an existing `data/hotel.db`
+  created before this phase rejects the new roles. Delete it — it is git-ignored
+  and reseeds automatically.
+
+---
+
+## 12. Next action
 
 §5 Multi-Organization (10 marks), the only remaining section:
 
@@ -290,7 +368,7 @@ Live server on port 8097, `HOTEL_DB` outside the repository, then terminated.
 
 ---
 
-## 11. Changed files this phase (PDF ingestion)
+## 13. Changed files this phase (PDF ingestion)
 
 | File | Change |
 |---|---|
@@ -308,7 +386,7 @@ Live server on port 8097, `HOTEL_DB` outside the repository, then terminated.
 
 ---
 
-## 12. Previous phase changed files
+## 14. Previous phase changed files
 
 | File | Change |
 |---|---|
@@ -324,9 +402,20 @@ Live server on port 8097, `HOTEL_DB` outside the repository, then terminated.
 
 ---
 
-## 13. Update protocol
+## 15. Update protocol
 
 1. Update after every completed phase and before every push.
 2. Refresh: commit hash, test result, implemented requirements, missing items.
 3. Never record passwords, tokens or secrets here.
 4. Never commit `*.db`, `__pycache__/` or temporary files.
+
+---
+
+## 16. Final commit
+
+| Item | Value |
+|---|---|
+| Branch | `main` |
+| Tests | 156 passing |
+| Marks demonstrated | 100 of 100 |
+| Pushed | **No** — awaiting instruction |

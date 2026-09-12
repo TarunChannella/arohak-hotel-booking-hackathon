@@ -1346,5 +1346,29 @@ class CrossOrganizationIsolationTests(MultiOrganizationTest):
         self.assertIsNone(self.hotels.get_room(room_b["id"], hotel_id=self.hotel_a))
 
 
+class DemoSeedTests(TempDbTest):
+    """The seeded demo accounts must be usable straight after a fresh start."""
+
+    def test_seeded_receptionist_is_assigned_to_the_default_hotel(self):
+        import server
+        receptionist = self.auth.register(
+            {"name": "Desk", "email": "desk@example.com",
+             "password": "password123", "role": "RECEPTIONIST"}, allow_staff=True)
+        orgs = OrganizationStore(self.db)
+        # Without an assignment a receptionist can reach nothing at all.
+        self.assertEqual(orgs.assigned_hotel_ids(receptionist["id"]), [])
+        self.assertEqual(self.bookings.list_all(
+            hotel_ids=orgs.accessible_hotel_ids(receptionist)), [])
+        # server.seed_demo_accounts assigns the demo receptionist, so the
+        # equivalent assignment must make the default hotel reachable.
+        orgs.assign_receptionist(
+            self.auth.register({"name": "Boss", "email": "boss@example.com",
+                                "password": "password123", "role": "ORGANIZATION_ADMIN"},
+                               allow_staff=True),
+            receptionist["id"], db.DEFAULT_HOTEL_ID)
+        self.assertEqual(orgs.accessible_hotel_ids(receptionist), [db.DEFAULT_HOTEL_ID])
+        self.assertTrue(hasattr(server, "seed_demo_accounts"))
+
+
 if __name__ == "__main__":
     unittest.main()

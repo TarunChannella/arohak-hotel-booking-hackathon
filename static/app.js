@@ -125,6 +125,21 @@ $('#register-form').onsubmit = async e => {
 
 /* ---------------- hotel ---------------- */
 
+async function loadHotels() {
+  // Customer flow: organization -> hotel -> rooms. One hotel still shows, so
+  // the selector is simply a list of one.
+  try {
+    const data = await api('/api/hotels');
+    const select = $('#hotel-select');
+    select.textContent = '';
+    data.hotels.forEach(h => {
+      const option = el('option', null, h.name + ' — ' + h.city);
+      option.value = h.id;
+      select.append(option);
+    });
+  } catch (err) { /* the default hotel still works */ }
+}
+
 async function loadHotel() {
   hotel = (await api('/api/hotel')).hotel;
   if (!hotel) return;
@@ -183,7 +198,9 @@ function roomCard(room) {
 
 $('#search-form').onsubmit = async e => {
   e.preventDefault();
-  lastSearch = { check_in: $('#check-in').value, check_out: $('#check-out').value, guests: +$('#guests').value };
+  lastSearch = { check_in: $('#check-in').value, check_out: $('#check-out').value,
+                 guests: +$('#guests').value };
+  if ($('#hotel-select').value) lastSearch.hotel_id = $('#hotel-select').value;
   const box = $('#rooms');
   box.textContent = '';
   try {
@@ -508,4 +525,4 @@ function localISO(d) {
   };
 })();
 
-loadHotel().then(refreshSession).catch(() => {});
+loadHotel().then(loadHotels).then(refreshSession).catch(() => {});
